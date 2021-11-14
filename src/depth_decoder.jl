@@ -8,7 +8,8 @@ function DecoderBlock(in_channels, skip_channels, out_channels)
         Conv((3, 3), out_channels=>out_channels, elu; pad=1)))
 end
 function (block::DecoderBlock)(x, skip)
-    o = upsample_nearest(x, (2, 2))
+    # o = upsample_nearest(x, (2, 2))
+    o = upsample_bilinear(x, (2, 2))
     if skip ≢ nothing
         o = cat(o, skip; dims=3)
     end

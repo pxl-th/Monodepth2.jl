@@ -5,6 +5,7 @@ using FileIO
 using ImageCore
 using ImageTransformations
 using Printf
+using MLDataPattern: shuffleobs
 using DataLoaders
 using LinearAlgebra
 
@@ -17,6 +18,28 @@ CUDA.allowscalar(false)
 
 Zygote.@nograd CUDA.ones
 Zygote.@nograd CUDA.zeros
+
+Base.@kwdef struct Params
+    min_depth::Float64 = 0.1
+    max_depth::Float64 = 100.0
+    disparity_smoothness::Float64 = 1e-3
+    frame_ids::Vector{Int64} = [1, 2, 3]
+
+    target_size::Tuple{Int64, Int64} = (128, 128) # width, height format TODO dataset
+    batch_size::Int64 = 1
+end
+
+struct TrainCache{S, B, P, K, I}
+    ssim::S
+    backprojections::B
+    projections::P
+    Ks::K
+    invKs::I
+
+    scales::Vector{Float64}
+    source_ids::Vector{Int64}
+    target_pos_id::Int64
+end
 
 include("kitty.jl")
 include("utils.jl")
@@ -32,95 +55,70 @@ function photometric_loss(
     α .* ssim_loss .+ (T(1.0) - α) .* l1_loss
 end
 
-function automasking_loss(ssim, inputs; source_ids, target_pos_id)
-    target = inputs[target_pos_id]
+automasking_loss(ssim, inputs, target; source_ids) =
     minimum(cat(map(sid -> photometric_loss(ssim, inputs[sid], target), source_ids)...; dims=3); dims=3)
-end
-
-prediction_loss(ssim, target, predictions) =
+prediction_loss(ssim, predictions, target) =
     minimum(cat(map(p -> photometric_loss(ssim, p, target), predictions)...; dims=3); dims=3)
 
-function generate_scale_image_predictions(
-    backproject, project, inputs, disparity, K, invK, # should have the same scale
-    Rs, ts; min_depth, max_depth, source_ids, target_pos_id,
-)
-    depth = disparity_to_depth(disparity, min_depth, max_depth)
-
-    _, dw, dh, dn = size(depth)
-    depth = reshape(depth, (1, dw * dh, dn))
-    cam_coordinates = backproject(depth, invK)
-
-    inv_depth = eltype(depth)(1.0) ./ depth
-    mean_inv_depth = reshape(mean(inv_depth; dims=2), (1, dn))
-    println("Mean inv depth $(mean_inv_depth)")
-
-    function warp(i, sid)
-        P = get_transformation(
-            Rs[i][:, 1, :], ts[i][:, 1, :] .* mean_inv_depth, Val(sid < target_pos_id))
-        projections = reshape(project(cam_coordinates, K, P), (2, dw, dh, dn))
-        grid_sample(inputs[sid], projections; padding_mode=:zeros)
-    end
-    map(si -> warp(si[1], si[2]), enumerate(source_ids))
-end
-
-function generate_scale_image_predictions(
-    backproject, project, inputs, disparity, K, invK, # should have the same scale
-    P; min_depth, max_depth, source_ids,
+function warp(
+    disparity, inputs, P, backproject, project, invK, K;
+    min_depth, max_depth, source_ids,
 )
     depth = disparity_to_depth(disparity, min_depth, max_depth)
     _, dw, dh, dn = size(depth)
     depth = reshape(depth, (1, dw * dh, dn))
-    cam_coordinates = backproject(depth, invK)
 
-    function warp(i, sid)
+    cam_coordinates = backproject(depth, invK)
+    function _warp(i, sid)
         projections = reshape(project(cam_coordinates, K, P[i]), (2, dw, dh, dn))
         grid_sample(inputs[sid], projections; padding_mode=:zeros)
     end
-    map(si -> warp(si[1], si[2]), enumerate(source_ids))
+    map(si -> _warp(si[1], si[2]), enumerate(source_ids))
 end
 
-function train_loss(
-    model, x, projections, backprojections, ssim;
-    Ks, invKs, source_ids, target_pos_id, seq_length,
-    scales, scale_sizes, min_depth, max_depth, disparity_smoothness,
-)
-    T = eltype(x)
+# Upscale disparities to original size.
+function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, parameters::Params) where T
     loss = T(0.0)
+    xs = map(i -> x[:, :, :, i, :], 1:length(parameters.frame_ids))
 
-    disparities, poses = model(x; source_ids, target_pos_id)
+    disparities, poses = model(
+        x; source_ids=train_cache.source_ids, target_pos_id=train_cache.target_pos_id)
     Rs, ts = poses
-    P = map(
-        si -> get_transformation(Rs[si[1]][:, 1, :], ts[si[1]][:, 1, :], Val(si[2] < target_pos_id)),
-        enumerate(source_ids))
+    P = map(si -> get_transformation(
+        Rs[si[1]][:, 1, :], ts[si[1]][:, 1, :], Val(si[2] < train_cache.target_pos_id)),
+        enumerate(train_cache.source_ids))
 
-    warped = nothing
-    for (i, (scale, scale_size)) in enumerate(zip(scales, scale_sizes))
-        scale_xs = map(s -> upsample_bilinear(x[:, :, :, s, :]; size=scale_size), 1:seq_length)
-
+    vis_warped = nothing
+    for (i, scale) in enumerate(train_cache.scales)
         disparity = disparities[i]
+        if i != length(train_cache.scales)
+            disparity = upsample_bilinear(disparity; size=parameters.target_size)
+        end
+
         dw, dh, _, db = size(disparity)
         disparity = reshape(disparity, (1, dw, dh, db))
+        warped_images = warp(
+            disparity, xs, P, train_cache.backprojections, train_cache.projections,
+            train_cache.invKs, train_cache.Ks; min_depth=parameters.min_depth,
+            max_depth=parameters.max_depth, source_ids=train_cache.source_ids)
 
-        # scale_predictions = generate_scale_image_predictions(
-        #     backprojections[i], projections[i], scale_xs, disparity,
-        #     Ks[i], invKs[i], Rs, ts; min_depth, max_depth, source_ids, target_pos_id)
-        scale_predictions = generate_scale_image_predictions(
-            backprojections[i], projections[i], scale_xs, disparity,
-            Ks[i], invKs[i], P; min_depth, max_depth, source_ids)
-        warped = scale_predictions[end]
+        vis_warped = cpu(warped_images[end])
 
-        auto_loss = automasking_loss(ssim, scale_xs; source_ids, target_pos_id)
-        pred_loss = prediction_loss(ssim, scale_xs[target_pos_id], scale_predictions)
+        auto_loss = automasking_loss(
+            train_cache.ssim, xs, xs[train_cache.target_pos_id]; source_ids=train_cache.source_ids)
+        pred_loss = prediction_loss(
+            train_cache.ssim, warped_images, xs[train_cache.target_pos_id])
         warp_loss = minimum(cat(auto_loss, pred_loss; dims=3); dims=3)
         loss += mean(warp_loss)
 
         disparity = reshape(disparity, size(disparity)[2:end])
         disparity = disparity ./ (mean(disparity; dims=(1, 2)) .+ T(1e-7))
-        disparity_loss = smooth_loss(disparity, scale_xs[target_pos_id]) .*
-            T(disparity_smoothness) .* T(scale)
+        disparity_loss = smooth_loss(disparity, xs[train_cache.target_pos_id]) .*
+            T(parameters.disparity_smoothness) .* T(scale)
         loss += disparity_loss
     end
-    loss / T(length(scales)), disparities, warped
+
+    loss / T(length(train_cache.scales)), cpu(disparities[end]), vis_warped
 end
 
 function save_disparity(disparity, i)
@@ -147,44 +145,41 @@ end
 function nn()
     device = cpu
     precision = f32
-
-    disparity_smoothness = 1e-1
-    min_depth, max_depth = 0.1, 100.0
+    parameters = Params(;batch_size=4)
     original_resolution = (376, 376)
-    target_size = (192, 192) # in (height, width) format.
 
-    batch_size = 2
     dataset = KittyDataset(
         "/home/pxl-th/Downloads/kitty-dataset", "00";
-        original_resolution, target_size, frame_ids=[1, 2, 3], n_frames=4541)
-    seq_length = length(dataset.frame_ids)
-    loader = DataLoader(dataset, batch_size)
+        original_resolution, target_size=parameters.target_size,
+        frame_ids=parameters.frame_ids, n_frames=4541)
+
     target_pos_id = dataset.target_pos_id
     source_ids = dataset.source_ids
 
     max_scale = 5
-    scale_levels = collect(2:5)
+    scale_levels = collect(3:5) # NOTE 2:5
 
     # In (width, height) format.
     scales = Float64[]
     scale_sizes = Tuple{Int64, Int64}[]
-    projections, backprojections = Project[], Backproject[]
-
     for scale_level in scale_levels
         scale = 1.0 / 2.0^(max_scale - scale_level)
-        scale_size = ceil.(Int64, target_size[[2, 1]] .* scale)
+        scale_size = ceil.(Int64, parameters.target_size[[2, 1]] .* scale)
 
         push!(scales, scale)
         push!(scale_sizes, scale_size)
-        push!(projections, Project(Float32; width=scale_size[1], height=scale_size[2]))
-        push!(backprojections, Backproject(Float32; width=scale_size[1], height=scale_size[2]))
     end
-    Ks, invKs = scale_intrinsics(dataset, scales)
+    @show scale_sizes
 
     # Transfer to the device.
-    Ks, invKs = map(device ∘ precision ∘ Array, Ks), map(device ∘ precision ∘ Array, invKs)
-    projections = map(device ∘ precision, projections)
-    backprojections = map(device ∘ precision, backprojections)
+    projections = device(precision(Project(; width=parameters.target_size[1], height=parameters.target_size[2])))
+    backprojections = device(precision(Backproject(; width=parameters.target_size[1], height=parameters.target_size[2])))
+    Ks, invKs = device(precision(Array(dataset.K))), device(precision(inv(Array(dataset.K))))
+    ssim = SSIM() |> precision |> device
+
+    train_cache = TrainCache(
+        ssim, backprojections, projections, Ks, invKs,
+        scales, source_ids, target_pos_id)
 
     encoder = EffNet("efficientnet-b0"; include_head=false, in_channels=1)
     encoder_channels = collect(encoder.stages_channels)
@@ -192,38 +187,33 @@ function nn()
     pose_decoder = PoseDecoder(encoder_channels[end], 2, 1)
     model = Model(encoder, depth_decoder, pose_decoder) |> precision |> device
 
-    ssim = SSIM() |> precision |> device
     θ = model |> params
-    optimizer = ADAM(3e-4) |> precision
-
-    # TODO separate pose cnn
-    # TODO compute warp error by upsampling lover-level to top level
+    optimizer = ADAM(1e-4) |> precision
 
     i = 1
-    for _ in 1:100, images in loader
-        x = images |> precision |> device
+    for _ in 1:100
+        loader = DataLoader(shuffleobs(dataset), parameters.batch_size)
+        for images in loader
+            x = images |> precision |> device
 
-        model |> trainmode!
-        loss_cpu = 0.0
-        disparity = nothing
-        warped = nothing
+            model |> trainmode!
+            loss_cpu = 0.0
+            disparity = nothing
+            warped = nothing
 
-        ∇ = gradient(θ) do
-            loss, disparities, warped = train_loss(
-                model, x, projections, backprojections, ssim;
-                Ks, invKs, source_ids, target_pos_id, seq_length,
-                scales, scale_sizes, min_depth, max_depth, disparity_smoothness)
-            disparity = cpu(disparities[end])
-            loss_cpu = loss |> cpu
-            loss
+            ∇ = gradient(θ) do
+                loss, disparity, warped = train_loss(model, x, train_cache, parameters)
+                loss_cpu = loss |> cpu
+                loss
+            end
+            Flux.Optimise.update!(optimizer, θ, ∇)
+
+            println("$i | Loss: $loss_cpu")
+            save_disparity(disparity, i)
+            save_depth(disparity, i)
+            save_warped(warped, i)
+            i += 1
         end
-        Flux.Optimise.update!(optimizer, θ, ∇)
-
-        println("$i | Loss: $loss_cpu")
-        save_disparity(disparity, i)
-        save_depth(disparity, i)
-        save_warped(warped, i)
-        i += 1
     end
 end
 nn()
