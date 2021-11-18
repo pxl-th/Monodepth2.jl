@@ -1,5 +1,5 @@
 struct KittyDataset
-    K::SMatrix{4, 4, Float64, 16}
+    K::SMatrix{3, 3, Float64, 9}
     frames_dir::String
 
     source_ids::Vector{Int64}
@@ -51,12 +51,13 @@ end
 DataLoaders.nobs(dataset::KittyDataset) = length(dataset)
 DataLoaders.getobs(dataset::KittyDataset, i) = dataset[i]
 
-@inline function parse_matrix(line)
+function parse_matrix(line)
     m = parse.(Float64, split(line, " "))
-    MMatrix{4, 4, Float64}(m..., 0, 0, 0, 1)'
+    K = MMatrix{4, 4, Float64}(m..., 0, 0, 0, 1)'
+    K[1:3, 1:3]
 end
 
-@inline function load_image(dataset::KittyDataset, image_path)
+function load_image(dataset::KittyDataset, image_path)
     image = load(image_path) |> channelview .|> Float32
     h, w = size(image)
     hp, wp = h ÷ 2, w ÷ 2
@@ -67,21 +68,8 @@ end
 
 function scale_intrinsic(K, scale = 1)
     fx, fy, cx, cy = K[1, 1], K[2, 2], K[1, 3], K[2, 3]
-    MMatrix{4, 4, Float64, 16}(
-        fx * scale, 0, 0, 0,
-        0, fy * scale, 0, 0,
-        cx * scale, cy * scale, 1, 0,
-        0, 0, 0, 1)
-end
-
-function scale_intrinsics(dataset::KittyDataset, scales)
-    Ks, invKs = typeof(dataset.K)[], typeof(dataset.K)[]
-    for scale in scales
-        K_scale = scale_intrinsic(dataset.K, scale)
-        invK_scale = inv(K_scale)
-
-        push!(Ks, K_scale)
-        push!(invKs, invK_scale)
-    end
-    Ks, invKs
+    MMatrix{3, 3, Float64, 9}(
+        fx * scale, 0, 0,
+        0, fy * scale, 0,
+        cx * scale, cy * scale, 1)
 end

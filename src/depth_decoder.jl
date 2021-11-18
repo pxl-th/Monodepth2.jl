@@ -4,11 +4,10 @@ end
 Flux.@functor DecoderBlock
 function DecoderBlock(in_channels, skip_channels, out_channels)
     DecoderBlock(Chain(
-        Conv((3, 3), (in_channels + skip_channels)=>out_channels, elu; pad=1),
-        Conv((3, 3), out_channels=>out_channels, elu; pad=1)))
+        Conv((3, 3), (in_channels + skip_channels)=>out_channels, elu; pad=1, bias=false),
+        Conv((3, 3), out_channels=>out_channels, elu; pad=1, bias=false)))
 end
 function (block::DecoderBlock)(x, skip)
-    # o = upsample_nearest(x, (2, 2))
     o = upsample_bilinear(x, (2, 2))
     if skip ≢ nothing
         o = cat(o, skip; dims=3)
@@ -47,11 +46,11 @@ function DepthDecoder(;encoder_channels, scale_levels)
     end
     partitions = tuple(partitions...)
 
-    decoder_layers = [
+    decoder_blocks = [
         DecoderBlock(inc, sc, oc)
         for (inc, sc, oc) in zip(in_channels, skip_channels, decoder_channels)]
     DepthDecoder(
-        partitions, scale_convolutions_ids, scale_convolutions, decoder_layers)
+        partitions, scale_convolutions_ids, scale_convolutions, decoder_blocks)
 end
 
 function (decoder::DepthDecoder)(features)

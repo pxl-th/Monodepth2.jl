@@ -1,3 +1,6 @@
+eye(::AbstractArray{T}, shape) where T = Array{T, 2}(I, shape)
+eye(::CuArray{T}, shape) where T = CuArray{T, 2}(I, shape)
+
 zeros_like(::AbstractArray{T}, shape) where T = zeros(T, shape)
 zeros_like(::CuArray{T}, shape) where T = CUDA.zeros(T, shape)
 
@@ -49,15 +52,15 @@ end
 
 """
 depth (1, W*H, N)
-invK (4, 4)
+invK (3, 3)
 
 # Returns
 
-(4, W*H, N)
+(3, W*H, N)
 """
 function (b::Backproject)(depth, invK)
     points = reshape(invK[1:3, 1:3] * b.coordinates, (3, size(b.coordinates, 2), 1))
-    to_homogeneous(points .* depth)
+    points .* depth
 end
 
 struct Project{N}
@@ -77,18 +80,63 @@ function normalize(p::Project, pixels::AbstractArray{T}) where T
 end
 
 """
-points (4, W*H, N)
-K (4, 4)
-T (4, 4, N)
+points (3, W*H, N)
+K (3, 3, 1)
+R (3, 3, N)
+t (3, 1, N)
 
 # Returns
 
+(2, W*H, N)
+
 Normalized projected coordinates in `(-1, 1)` range.
 """
-function (p::Project)(points::AbstractArray{V}, K, T) where V
-    camera_points = (K ⊠ T) ⊠ points
+function (p::Project)(points::AbstractArray{V}, K, R, t) where V
+    camera_points = K ⊠ ((R ⊠ points) .+ t)
     denom = V(1.0) ./ (camera_points[[3], :, :] .+ V(1e-7))
     normalize(p, camera_points[1:2, :, :] .* denom)
+end
+
+# rvec 3xN
+function compose_rotation(rvec)
+    T, N = eltype(rvec), size(rvec, 2)
+
+    θ = sqrt.(sum(abs2, rvec; dims=1)) # 1xN
+    rvec = rvec ./ (θ .+ T(1e-7)) # 3xN
+    S = hat(rvec)
+
+    rvec = reshape(rvec, (3, 1, N))
+    cosθ = reshape(cos.(θ), (1, 1, N))
+    sinθ = reshape(sin.(θ), (1, 1, N))
+
+    rvec ⊠ permutedims(rvec, (2, 1, 3)) .* (T(1.0) .- cosθ) .+ # 3x3xN
+        cosθ .* eye(rvec, (3, 3)) .+ sinθ .* S
+end
+
+function hat(rvec)
+    N = size(rvec, 2)
+    S = zeros_like(rvec, (3, 3, N))
+    S[2, 1, :] .=  rvec[3, :]
+    S[1, 2, :] .= -rvec[3, :]
+    S[3, 1, :] .= -rvec[2, :]
+    S[1, 3, :] .=  rvec[2, :]
+    S[3, 2, :] .=  rvec[1, :]
+    S[2, 3, :] .= -rvec[1, :]
+    S
+end
+
+# TODO gpu support
+function rrule(::typeof(hat), v)
+    Y = hat(v)
+    function hat_pullback(Δ)
+        d = unthunk(Δ)
+        ∇v = zeros_like(v, size(v))
+        ∇v[1, :] .= d[3, 2, :] .- d[2, 3, :]
+        ∇v[2, :] .= -d[3, 1, :] .+ d[1, 3, :]
+        ∇v[3, :] .= d[2, 1, :] .- d[1, 2, :]
+        NoTangent(), ∇v
+    end
+    return Y, hat_pullback
 end
 
 """
@@ -169,6 +217,9 @@ end
 """
 Compute smoothness loss for a disparity image.
 `image` is used for edge-aware smoothness.
+
+The disparity smoothness loss penalizes the inverse depth spatial gradients.
+The goal of this loss is to make nearby pixels have the similar depth -> spatial smoothness.
 
 # Arguments
 

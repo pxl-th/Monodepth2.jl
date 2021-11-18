@@ -9,15 +9,25 @@ using MLDataPattern: shuffleobs
 using DataLoaders
 using LinearAlgebra
 
+using Rotations
 using Statistics
+import ChainRulesCore: rrule
+using ChainRulesCore
 using CUDA
 using Zygote
 using Flux
 using EfficientNet
 CUDA.allowscalar(false)
 
+include("kitty.jl")
+include("utils.jl")
+include("depth_decoder.jl")
+include("pose_decoder.jl")
+include("model.jl")
+
 Zygote.@nograd CUDA.ones
 Zygote.@nograd CUDA.zeros
+Zygote.@nograd eye
 
 Base.@kwdef struct Params
     min_depth::Float64 = 0.1
@@ -41,12 +51,6 @@ struct TrainCache{S, B, P, K, I}
     target_pos_id::Int64
 end
 
-include("kitty.jl")
-include("utils.jl")
-include("depth_decoder.jl")
-include("pose_decoder.jl")
-include("model.jl")
-
 function photometric_loss(
     ssim, predicted::AbstractArray{T}, target::AbstractArray{T}; α = T(0.85),
 ) where T
@@ -61,8 +65,8 @@ prediction_loss(ssim, predictions, target) =
     minimum(cat(map(p -> photometric_loss(ssim, p, target), predictions)...; dims=3); dims=3)
 
 function warp(
-    disparity, inputs, P, backproject, project, invK, K;
-    min_depth, max_depth, source_ids,
+    disparity, inputs, Ps, backproject, project, invK, K;
+    min_depth, max_depth, source_ids, target_pos_id,
 )
     depth = disparity_to_depth(disparity, min_depth, max_depth)
     _, dw, dh, dn = size(depth)
@@ -70,23 +74,35 @@ function warp(
 
     cam_coordinates = backproject(depth, invK)
     function _warp(i, sid)
-        projections = reshape(project(cam_coordinates, K, P[i]), (2, dw, dh, dn))
-        grid_sample(inputs[sid], projections; padding_mode=:zeros)
+        R, t = Ps[i]
+        warped_uv = reshape(project(cam_coordinates, K, R, t), (2, dw, dh, dn))
+        grid_sample(inputs[sid], warped_uv; padding_mode=:border)
     end
     map(si -> _warp(si[1], si[2]), enumerate(source_ids))
 end
 
-# Upscale disparities to original size.
+function _get_transformation(rvec, t, invert)
+    R = compose_rotation(rvec)
+    if invert
+        R = permutedims(R, (2, 1, 3))
+        t = R ⊠ -t
+    end
+    R, t
+end
+
 function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, parameters::Params) where T
     loss = T(0.0)
     xs = map(i -> x[:, :, :, i, :], 1:length(parameters.frame_ids))
 
     disparities, poses = model(
         x; source_ids=train_cache.source_ids, target_pos_id=train_cache.target_pos_id)
-    Rs, ts = poses
-    P = map(si -> get_transformation(
-        Rs[si[1]][:, 1, :], ts[si[1]][:, 1, :], Val(si[2] < train_cache.target_pos_id)),
-        enumerate(train_cache.source_ids))
+    rvecs, tvecs = poses # 3, 1, N
+    println(cpu(rvecs)[end][:, 1, 1], " | ", cpu(tvecs)[end][:, 1, 1])
+
+    Ps = map(si -> _get_transformation(
+        rvecs[si[1]][:, 1, :],
+        tvecs[si[1]],
+        si[2] > train_cache.target_pos_id), enumerate(train_cache.source_ids))
 
     vis_warped = nothing
     for (i, scale) in enumerate(train_cache.scales)
@@ -98,9 +114,10 @@ function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, paramet
         dw, dh, _, db = size(disparity)
         disparity = reshape(disparity, (1, dw, dh, db))
         warped_images = warp(
-            disparity, xs, P, train_cache.backprojections, train_cache.projections,
-            train_cache.invKs, train_cache.Ks; min_depth=parameters.min_depth,
-            max_depth=parameters.max_depth, source_ids=train_cache.source_ids)
+            disparity, xs, Ps, train_cache.backprojections, train_cache.projections,
+            train_cache.invKs, train_cache.Ks;
+            min_depth=parameters.min_depth, max_depth=parameters.max_depth,
+            source_ids=train_cache.source_ids, target_pos_id=train_cache.target_pos_id)
 
         vis_warped = cpu(warped_images[end])
 
@@ -121,31 +138,30 @@ function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, paramet
     loss / T(length(train_cache.scales)), cpu(disparities[end]), vis_warped
 end
 
-function save_disparity(disparity, i)
+function save_disparity(disparity, epoch, i)
     disparity = disparity[:, :, 1, 1]
     disparity = permutedims(disparity, (2, 1))
-    println("Disp min/max: $(minimum(disparity)), $(maximum(disparity))")
-    save("/home/pxl-th/projects/disp-$i.png", disparity)
+    save("/home/pxl-th/projects/disp-$epoch-$i.png", disparity)
 end
 
-function save_depth(disparity, i)
+function save_depth(disparity, epoch, i)
     depth = disparity_to_depth(disparity, 0.1, 100.0)
     depth = depth[:, :, 1, 1]
     depth = permutedims(depth, (2, 1)) ./ 100.0
-    println("Depth min/max: $(minimum(depth)), $(maximum(depth))")
-    save("/home/pxl-th/projects/depth-$i.png", depth)
+    save("/home/pxl-th/projects/depth-$epoch-$i.png", depth)
 end
 
-function save_warped(warped, i)
+function save_warped(warped, epoch, i)
     warped = warped[:, :, 1, 1]
     warped = permutedims(warped, (2, 1))
-    save("/home/pxl-th/projects/warped-$i.png", warped)
+    save("/home/pxl-th/projects/warped-$epoch-$i.png", warped)
 end
 
 function nn()
-    device = cpu
+    device = gpu
     precision = f32
-    parameters = Params(;batch_size=4)
+    parameters = Params(;
+        batch_size=4, target_size=(64, 64), disparity_smoothness=1e-3)
     original_resolution = (376, 376)
 
     dataset = KittyDataset(
@@ -157,7 +173,7 @@ function nn()
     source_ids = dataset.source_ids
 
     max_scale = 5
-    scale_levels = collect(3:5) # NOTE 2:5
+    scale_levels = collect(2:5) # NOTE 2:5
 
     # In (width, height) format.
     scales = Float64[]
@@ -190,8 +206,8 @@ function nn()
     θ = model |> params
     optimizer = ADAM(1e-4) |> precision
 
-    i = 1
-    for _ in 1:100
+    for epoch in 1:100
+        i = 1
         loader = DataLoader(shuffleobs(dataset), parameters.batch_size)
         for images in loader
             x = images |> precision |> device
@@ -201,17 +217,19 @@ function nn()
             disparity = nothing
             warped = nothing
 
-            ∇ = gradient(θ) do
+            @time ∇ = gradient(θ) do
                 loss, disparity, warped = train_loss(model, x, train_cache, parameters)
                 loss_cpu = loss |> cpu
                 loss
             end
             Flux.Optimise.update!(optimizer, θ, ∇)
 
-            println("$i | Loss: $loss_cpu")
-            save_disparity(disparity, i)
-            save_depth(disparity, i)
-            save_warped(warped, i)
+            if i % 13 == 0
+                println("$epoch | $i | Loss: $loss_cpu")
+                save_disparity(disparity, epoch, i)
+                save_depth(disparity, epoch, i)
+                save_warped(warped, epoch, i)
+            end
             i += 1
         end
     end

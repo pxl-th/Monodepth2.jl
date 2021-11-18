@@ -1,22 +1,28 @@
 using Test
-using LinearAlgebra
-using Rotations
-using Statistics
-using Monodepth
+using ChainRulesTestUtils
 
-@testset "Test transformations construction" begin
+using LinearAlgebra
+using Statistics
+using Rotations
+using CUDA
+using Zygote
+using Flux
+using Monodepth
+CUDA.allowscalar(false)
+
+@testset "Test rotations" begin
     v = rand(Float64, (3, 1))
-    t = reshape([0.0, 0.0, 0.0], (3, 1))
+    p = rand(Float64, (3, 1))
 
     target = RotationVec(v...)
-    source = Monodepth.transformation_from_axis_angle_translation(
-        v, t, Val(false))
-    @test all(isapprox.(target, source[1:3, 1:3, 1]; atol=1e-5))
+    source = Monodepth.compose_rotation(v)
+    @test all(isapprox.(target, source[:, :, 1]; atol=1e-5))
+    test_rrule(Monodepth.hat, v)
 
-    target = transpose(target)
-    source = Monodepth.transformation_from_axis_angle_translation(
-        v, t, Val(true))
-    @test all(isapprox.(target, source[1:3, 1:3, 1]; atol=1e-5))
+    vg = CuArray(v)
+    source = Monodepth.compose_rotation(vg)
+    @test source isa CuArray
+    @test all(isapprox.(target, collect(source)[:, :, 1]; atol=1e-5))
 end
 
 @testset "Test SSIM" begin
@@ -58,26 +64,27 @@ end
 end
 
 @testset "Test identity image warping" begin
-    res = 32
-    image = rand(Float64, res, res, 1, 1)
-
+    res = 16
+    N = 2
+    image = rand(Float64, res, res, 1, N)
+    depth = rand(Float64, (1, res * res, N))
     K = reshape(Float64[
-        910, 0, 0, 0,
-        0, 910, 0, 0,
-        res / 2, res / 2, 1, 0,
-        0, 0, 0, 1,
-    ], (4, 4))
+        910, 0, 0,
+        0, 910, 0,
+        res / 2, res / 2, 1], (3, 3))
     invK = inv(K)
+    K = reshape(K, (3, 3, 1))
 
-    v = zeros(Float64, (3, 1))
-    t = zeros(Float64, (3, 1))
-    T = Monodepth.transformation_from_axis_angle_translation(v, t, Val(false))
-    depth = rand(Float64, (1, res * res, 1))
+    v = zeros(Float64, (3, N))
+    t = zeros(Float64, (3, 1, N))
+    R = Monodepth.compose_rotation(v)
 
     projection = Monodepth.Project(;width=res, height=res)
     backprojection = Monodepth.Backproject(;width=res, height=res)
 
-    grid = reshape(projection(backprojection(depth, invK), K, T), (2, res, res, 1))
+    camera_points = backprojection(depth, invK)
+    warped_uv = projection(camera_points, K, R, t)
+    grid = reshape(warped_uv, (2, res, res, N))
     sampled = Monodepth.Flux.grid_sample(image, grid)
     @test all(isapprox.(image, sampled; atol=1e-3))
 end
