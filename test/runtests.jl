@@ -25,6 +25,25 @@ CUDA.allowscalar(false)
     @test all(isapprox.(target, collect(source)[:, :, 1]; atol=1e-5))
 end
 
+@testset "Test transformation" begin
+    rvec = rand(Float64, (3, 1))
+    tvec = rand(Float64, (3, 1, 1))
+    p = rand(Float64, (3, 1, 1))
+
+    R, t = Monodepth._get_transformation(rvec, tvec, false)
+    tp = RotationVec(rvec...) * p[:, 1, 1] .+ t[:, 1, 1]
+    np = R ⊠ p .+ t
+    @test all(isapprox.(np, tp; atol=1e-6))
+
+    R, t = Monodepth._get_transformation(rvec, tvec, true)
+    invR = transpose(RotationVec(rvec...))
+    invt = -(invR * tvec[:, 1, 1])
+    tp = invR * np[:, 1, 1] .+ invt
+    op = R ⊠ np .+ t
+    @test all(isapprox.(op, tp; atol=1e-6))
+    @test all(isapprox.(op, p; atol=1e-6))
+end
+
 @testset "Test SSIM" begin
     ssim = Monodepth.SSIM()
 

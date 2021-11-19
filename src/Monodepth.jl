@@ -20,6 +20,7 @@ using EfficientNet
 CUDA.allowscalar(false)
 
 include("kitty.jl")
+include("dtk.jl")
 include("utils.jl")
 include("depth_decoder.jl")
 include("pose_decoder.jl")
@@ -27,7 +28,7 @@ include("model.jl")
 
 Zygote.@nograd CUDA.ones
 Zygote.@nograd CUDA.zeros
-Zygote.@nograd eye
+Zygote.@nograd eye_like
 
 Base.@kwdef struct Params
     min_depth::Float64 = 0.1
@@ -66,7 +67,7 @@ prediction_loss(ssim, predictions, target) =
 
 function warp(
     disparity, inputs, Ps, backproject, project, invK, K;
-    min_depth, max_depth, source_ids, target_pos_id,
+    min_depth, max_depth, source_ids,
 )
     depth = disparity_to_depth(disparity, min_depth, max_depth)
     _, dw, dh, dn = size(depth)
@@ -117,7 +118,7 @@ function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, paramet
             disparity, xs, Ps, train_cache.backprojections, train_cache.projections,
             train_cache.invKs, train_cache.Ks;
             min_depth=parameters.min_depth, max_depth=parameters.max_depth,
-            source_ids=train_cache.source_ids, target_pos_id=train_cache.target_pos_id)
+            source_ids=train_cache.source_ids)
 
         vis_warped = cpu(warped_images[end])
 
@@ -152,36 +153,44 @@ function save_depth(disparity, epoch, i)
 end
 
 function save_warped(warped, epoch, i)
-    warped = warped[:, :, 1, 1]
-    warped = permutedims(warped, (2, 1))
+    c = size(warped, 3)
+    if c == 1
+        warped = warped[:, :, 1, 1]
+        warped = permutedims(warped, (2, 1))
+    else
+        warped = warped[:, :, :, 1]
+        warped = colorview(RGB, permutedims(warped, (3, 2, 1)))
+    end
     save("/home/pxl-th/projects/warped-$epoch-$i.png", warped)
 end
 
 function nn()
-    device = gpu
+    device = cpu
     precision = f32
+
+    dataset = Depth10k("/home/pxl-th/projects/depth10k/imgs")
     parameters = Params(;
-        batch_size=4, target_size=(64, 64), disparity_smoothness=1e-3)
-    original_resolution = (376, 376)
+        batch_size=1, disparity_smoothness=1e-3,
+        target_size=dataset.resolution)
+        # target_size=(224, 64))
 
-    dataset = KittyDataset(
-        "/home/pxl-th/Downloads/kitty-dataset", "00";
-        original_resolution, target_size=parameters.target_size,
-        frame_ids=parameters.frame_ids, n_frames=4541)
+    # original_resolution = (1241, 376)
+    # dataset = KittyDataset(
+    #     "/home/pxl-th/Downloads/kitty-dataset", "00";
+    #     original_resolution, target_size=parameters.target_size,
+    #     frame_ids=parameters.frame_ids, n_frames=4541)
 
-    target_pos_id = dataset.target_pos_id
-    source_ids = dataset.source_ids
+    @show length(dataset)
+    display(dataset.K); println()
 
     max_scale = 5
-    scale_levels = collect(2:5) # NOTE 2:5
+    scale_levels = collect(2:5)
 
-    # In (width, height) format.
     scales = Float64[]
     scale_sizes = Tuple{Int64, Int64}[]
     for scale_level in scale_levels
         scale = 1.0 / 2.0^(max_scale - scale_level)
-        scale_size = ceil.(Int64, parameters.target_size[[2, 1]] .* scale)
-
+        scale_size = ceil.(Int64, parameters.target_size .* scale)
         push!(scales, scale)
         push!(scale_sizes, scale_size)
     end
@@ -195,9 +204,9 @@ function nn()
 
     train_cache = TrainCache(
         ssim, backprojections, projections, Ks, invKs,
-        scales, source_ids, target_pos_id)
+        scales, dataset.source_ids, dataset.target_pos_id)
 
-    encoder = EffNet("efficientnet-b0"; include_head=false, in_channels=1)
+    encoder = EffNet("efficientnet-b0"; include_head=false, in_channels=3)
     encoder_channels = collect(encoder.stages_channels)
     depth_decoder = DepthDecoder(;encoder_channels, scale_levels)
     pose_decoder = PoseDecoder(encoder_channels[end], 2, 1)
@@ -207,7 +216,7 @@ function nn()
     optimizer = ADAM(1e-4) |> precision
 
     for epoch in 1:100
-        i = 1
+        i = 0
         loader = DataLoader(shuffleobs(dataset), parameters.batch_size)
         for images in loader
             x = images |> precision |> device

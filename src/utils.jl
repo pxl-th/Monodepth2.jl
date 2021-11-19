@@ -1,14 +1,11 @@
-eye(::AbstractArray{T}, shape) where T = Array{T, 2}(I, shape)
-eye(::CuArray{T}, shape) where T = CuArray{T, 2}(I, shape)
+eye_like(::AbstractArray{T}, shape) where T = Array{T, 2}(I, shape)
+eye_like(::CuArray{T}, shape) where T = CuArray{T, 2}(I, shape)
 
 zeros_like(::AbstractArray{T}, shape) where T = zeros(T, shape)
 zeros_like(::CuArray{T}, shape) where T = CUDA.zeros(T, shape)
 
 ones_like(::AbstractArray{T}, shape) where T = ones(T, shape)
 ones_like(::CuArray{T}, shape) where T = CUDA.ones(T, shape)
-
-to_homogeneous(x::AbstractArray{T}) where T = vcat(x, ones(T, 1, size(x)[2:end]...))
-to_homogeneous(x::CuArray{T}) where T = vcat(x, CUDA.ones(T, 1, size(x)[2:end]...))
 
 struct SSIM{P}
     pool::P
@@ -110,7 +107,7 @@ function compose_rotation(rvec)
     sinθ = reshape(sin.(θ), (1, 1, N))
 
     rvec ⊠ permutedims(rvec, (2, 1, 3)) .* (T(1.0) .- cosθ) .+ # 3x3xN
-        cosθ .* eye(rvec, (3, 3)) .+ sinθ .* S
+        cosθ .* eye_like(rvec, (3, 3)) .+ sinθ .* S
 end
 
 function hat(rvec)
@@ -125,7 +122,6 @@ function hat(rvec)
     S
 end
 
-# TODO gpu support
 function rrule(::typeof(hat), v)
     Y = hat(v)
     function hat_pullback(Δ)
@@ -137,81 +133,6 @@ function rrule(::typeof(hat), v)
         NoTangent(), ∇v
     end
     return Y, hat_pullback
-end
-
-"""
-v (3, N)
-t (3, N)
-"""
-function translation_matrix(t)
-    N = size(t, 2)
-    ze = zeros_like(t, (1, N))
-    on = ones_like(t, (1, N))
-
-    translation = cat([
-        on, ze, ze, ze,
-        ze, on, ze, ze,
-        ze, ze, on, ze,
-        t[[1], :], t[[2], :], t[[3], :], on,
-    ]...; dims=1)
-    reshape(translation, (4, 4, N))
-end
-
-function rotation_from_axis_angle(v::AbstractArray{T}) where T
-    angle = sqrt.(sum(abs2, v; dims=1))
-    axis = v ./ (angle .+ T(1e-7))
-
-    ca, sa = cos.(angle), sin.(angle)
-    C = T(1.0) .- ca
-
-    x, y, z = axis[[1], :], axis[[2], :], axis[[3], :]
-    xs, ys, zs = x .* sa, y .* sa, z .* sa
-    xC, yC, zC = x .* C, y .* C, z .* C
-    xyC, yzC, zxC = x .* yC, y .* zC, z .* xC
-
-    N = size(v, 2)
-    ze = zeros_like(v, (1, N))
-    on = ones_like(v, (1, N))
-
-    rotation = cat([
-        x .* xC .+ ca, xyC .+ zs, zxC .- ys, ze,
-        xyC .- zs, y .* yC .+ ca, yzC .+ xs, ze,
-        zxC .+ ys, yzC .- xs, z .* zC .+ ca, ze,
-        ze, ze, ze, on,
-    ]...; dims=1)
-    reshape(rotation, (4, 4, N))
-end
-
-get_transformation(v, t, invert::Val{true}) =
-    permutedims(rotation_from_axis_angle(v), (2, 1, 3)) ⊠ translation_matrix(-t)
-
-"""
-v (3, N)
-t (3, N)
-"""
-function get_transformation(v::AbstractArray{T}, t, invert::Val{false}) where T
-    angle = sqrt.(sum(abs2, v; dims=1))
-    axis = v ./ (angle .+ T(1e-7))
-
-    ca, sa = cos.(angle), sin.(angle)
-    C = T(1.0) .- ca
-
-    x, y, z = axis[[1], :], axis[[2], :], axis[[3], :]
-    xs, ys, zs = x .* sa, y .* sa, z .* sa
-    xC, yC, zC = x .* C, y .* C, z .* C
-    xyC, yzC, zxC = x .* yC, y .* zC, z .* xC
-
-    N = size(v, 2)
-    ze = zeros_like(v, (1, N))
-    on = ones_like(v, (1, N))
-
-    transformation = cat([
-        x .* xC .+ ca, xyC .+ zs, zxC .- ys, ze,
-        xyC .- zs, y .* yC .+ ca, yzC .+ xs, ze,
-        zxC .+ ys, yzC .- xs, z .* zC .+ ca, ze,
-        t[[1], :], t[[2], :], t[[3], :], on,
-    ]...; dims=1)
-    reshape(transformation, (4, 4, N))
 end
 
 """

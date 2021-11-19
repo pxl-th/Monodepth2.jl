@@ -20,12 +20,10 @@ function KittyDataset(base_dir, sequence; original_resolution, target_size, fram
     frames_dir = joinpath(base_dir, "sequences", sequence)
     Ks = readlines(joinpath(frames_dir, "calib.txt"))
     K = parse_matrix(Ks[1][5:end])
-    K[1, 3] = K[2, 3]
     K = scale_intrinsic(K, mean(target_size ./ original_resolution))
     display(K); println()
 
     frames_dir = joinpath(frames_dir, "image_0")
-
     target_pos_id = ceil(Int, (length(frame_ids) + 1.0) / 2.0)
     source_ids = collect(setdiff(Set{Int64}(1:length(frame_ids)), target_pos_id))
 
@@ -59,11 +57,9 @@ end
 
 function load_image(dataset::KittyDataset, image_path)
     image = load(image_path) |> channelview .|> Float32
-    h, w = size(image)
-    hp, wp = h ÷ 2, w ÷ 2
-    image = image[:, (wp - hp):(wp + hp)]
+    image = permutedims(image, (2, 1))
     image = imresize(image, dataset.target_size)
-    Flux.unsqueeze(permutedims(image, (2, 1)), 3)
+    Flux.unsqueeze(image, 3)
 end
 
 function scale_intrinsic(K, scale = 1)
