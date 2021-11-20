@@ -19,6 +19,9 @@ using Flux
 using EfficientNet
 CUDA.allowscalar(false)
 
+import BSON
+using BSON: @save, @load
+
 include("kitty.jl")
 include("dtk.jl")
 include("utils.jl")
@@ -199,7 +202,8 @@ function nn()
     # Transfer to the device.
     projections = device(precision(Project(; width=parameters.target_size[1], height=parameters.target_size[2])))
     backprojections = device(precision(Backproject(; width=parameters.target_size[1], height=parameters.target_size[2])))
-    Ks, invKs = device(precision(Array(dataset.K))), device(precision(inv(Array(dataset.K))))
+    Ks = device(precision(Array(dataset.K)))
+    invKs = device(precision(inv(Array(dataset.K))))
     ssim = SSIM() |> precision |> device
 
     train_cache = TrainCache(
@@ -238,6 +242,11 @@ function nn()
                 save_disparity(disparity, epoch, i)
                 save_depth(disparity, epoch, i)
                 save_warped(warped, epoch, i)
+            end
+            if i % 101 == 0
+                model_host = model |> cpu
+                @save "./models/epoch-$epoch-loss-$loss_cpu.bson" model_host
+                # model_host = BSON.load("./models/epoch-$epoch-loss-$loss_cpu.bson", @__MODULE__)
             end
             i += 1
         end
