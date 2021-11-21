@@ -147,9 +147,17 @@ end
 
 function save_disparity(disparity, epoch, i)
     disparity = disparity[:, :, 1, 1]
-    disparity = permutedims(disparity, (2, 1))
+    disparity = permutedims(disparity, (2, 1))[end:-1:1, :]
     fig = heatmap(disparity; c=:thermal, aspect_ratio=:equal)
     png(fig, "/home/pxl-th/projects/disp-$epoch-$i.png")
+end
+
+function save_disparity(disparity, path)
+    disparity = permutedims(disparity, (2, 1))[end:-1:1, :]
+    fig = heatmap(
+        disparity; c=:thermal, aspect_ratio=:equal,
+        colorbar=:none, legend=:none, grid=false, showaxis=false)
+    png(fig, path)
 end
 
 function save_warped(warped, epoch, i)
@@ -241,13 +249,23 @@ function nn()
             end
             if i % 101 == 0
                 model_host = model |> cpu
-                @save "./models/epoch-$epoch-loss-$loss_cpu.bson" model_host
-                # model_host = BSON.load("./models/epoch-$epoch-loss-$loss_cpu.bson", @__MODULE__)
+                @save "./models/epoch-$epoch-iter-$i-loss-$loss_cpu.bson" model_host
             end
             i += 1
         end
     end
 end
 # nn()
+
+function eval()
+    model_path = "/home/pxl-th/projects/Monodepth.jl/models/epoch-1-loss-0.10200599.bson"
+    model = BSON.load(model_path, @__MODULE__)[:model_host]
+
+    dataset = Depth10k("/home/pxl-th/projects/depth10k/imgs")
+    x = dataset[1][:, :, :, [dataset.target_pos_id]]
+    disparities = eval_disparity(model, x)
+    save_disparity(disparities[end][:, :, 1, 1], "/home/pxl-th/d.png")
+end
+eval()
 
 end

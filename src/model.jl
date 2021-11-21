@@ -18,6 +18,8 @@ function (m::Model)(images; source_ids, target_pos_id)
     disparities, poses
 end
 
+eval_disparity(m::Model, x) = m.depth_decoder(m.encoder(x, Val(:stages)))
+
 function get_pose_features(features, i, target_pos_id)
     if i < target_pos_id
         return features[:, :, :, i, :], features[:, :, :, target_pos_id, :]
