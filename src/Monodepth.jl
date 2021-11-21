@@ -1,5 +1,8 @@
 module Monodepth
 
+using Plots
+gr()
+
 using StaticArrays
 using FileIO
 using ImageCore
@@ -145,14 +148,8 @@ end
 function save_disparity(disparity, epoch, i)
     disparity = disparity[:, :, 1, 1]
     disparity = permutedims(disparity, (2, 1))
-    save("/home/pxl-th/projects/disp-$epoch-$i.png", disparity)
-end
-
-function save_depth(disparity, epoch, i)
-    depth = disparity_to_depth(disparity, 0.1, 100.0)
-    depth = depth[:, :, 1, 1]
-    depth = permutedims(depth, (2, 1)) ./ 100.0
-    save("/home/pxl-th/projects/depth-$epoch-$i.png", depth)
+    fig = heatmap(disparity; c=:thermal, aspect_ratio=:equal)
+    png(fig, "/home/pxl-th/projects/disp-$epoch-$i.png")
 end
 
 function save_warped(warped, epoch, i)
@@ -240,7 +237,6 @@ function nn()
             if i % 13 == 0
                 println("$epoch | $i | Loss: $loss_cpu")
                 save_disparity(disparity, epoch, i)
-                save_depth(disparity, epoch, i)
                 save_warped(warped, epoch, i)
             end
             if i % 101 == 0
@@ -252,6 +248,6 @@ function nn()
         end
     end
 end
-nn()
+# nn()
 
 end
