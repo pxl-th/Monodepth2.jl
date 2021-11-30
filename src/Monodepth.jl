@@ -107,9 +107,8 @@ function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, paramet
     println(cpu(rvecs)[end][:, 1, 1], " | ", cpu(tvecs)[end][:, 1, 1])
 
     Ps = map(si -> _get_transformation(
-        rvecs[si[1]][:, 1, :],
-        tvecs[si[1]],
-        si[2] > train_cache.target_pos_id), enumerate(train_cache.source_ids))
+        rvecs[si[1]][:, 1, :], tvecs[si[1]],
+        si[2] < train_cache.target_pos_id), enumerate(train_cache.source_ids))
 
     vis_warped = nothing
     for (i, scale) in enumerate(train_cache.scales)
@@ -126,7 +125,7 @@ function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, paramet
             min_depth=parameters.min_depth, max_depth=parameters.max_depth,
             source_ids=train_cache.source_ids)
 
-        vis_warped = cpu(warped_images[end])
+        vis_warped = cpu.(warped_images)
 
         auto_loss = automasking_loss(
             train_cache.ssim, xs, xs[train_cache.target_pos_id]; source_ids=train_cache.source_ids)
@@ -145,13 +144,6 @@ function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, paramet
     loss / T(length(train_cache.scales)), cpu(disparities[end]), vis_warped
 end
 
-function save_disparity(disparity, epoch, i)
-    disparity = disparity[:, :, 1, 1]
-    disparity = permutedims(disparity, (2, 1))[end:-1:1, :]
-    fig = heatmap(disparity; c=:thermal, aspect_ratio=:equal)
-    png(fig, "/home/pxl-th/projects/disp-$epoch-$i.png")
-end
-
 function save_disparity(disparity, path)
     disparity = permutedims(disparity, (2, 1))[end:-1:1, :]
     fig = heatmap(
@@ -160,16 +152,13 @@ function save_disparity(disparity, path)
     png(fig, path)
 end
 
-function save_warped(warped, epoch, i)
-    c = size(warped, 3)
-    if c == 1
-        warped = warped[:, :, 1, 1]
+function save_warped(warped, path)
+    if ndims(warped) == 2
         warped = permutedims(warped, (2, 1))
     else
-        warped = warped[:, :, :, 1]
         warped = colorview(RGB, permutedims(warped, (3, 2, 1)))
     end
-    save("/home/pxl-th/projects/warped-$epoch-$i.png", warped)
+    save(path, warped)
 end
 
 function nn()
@@ -178,6 +167,7 @@ function nn()
 
     dataset = Depth10k("/home/pxl-th/projects/depth10k/imgs")
     parameters = Params(;
+        min_depth=0.1, max_depth=100.0,
         batch_size=1, disparity_smoothness=1e-3,
         target_size=dataset.resolution)
         # target_size=(224, 64))
@@ -215,6 +205,7 @@ function nn()
         ssim, backprojections, projections, Ks, invKs,
         scales, dataset.source_ids, dataset.target_pos_id)
 
+    # encoder = EfficientNet.from_pretrained("efficientnet-b0"; include_head=false)
     encoder = EffNet("efficientnet-b0"; include_head=false, in_channels=3)
     encoder_channels = collect(encoder.stages_channels)
     depth_decoder = DepthDecoder(;encoder_channels, scale_levels)
@@ -222,13 +213,15 @@ function nn()
     model = Model(encoder, depth_decoder, pose_decoder) |> precision |> device
 
     θ = model |> params
-    optimizer = ADAM(1e-4) |> precision
+    optimizer = ADAM(3e-4) |> precision
 
     for epoch in 1:100
         i = 0
         loader = DataLoader(shuffleobs(dataset), parameters.batch_size)
         for images in loader
+        # for k in 1:1
             x = images |> precision |> device
+            # x = Flux.unsqueeze(dataset[1], 5) |> precision |> device
 
             model |> trainmode!
             loss_cpu = 0.0
@@ -244,10 +237,17 @@ function nn()
 
             if i % 13 == 0
                 println("$epoch | $i | Loss: $loss_cpu")
-                save_disparity(disparity, epoch, i)
-                save_warped(warped, epoch, i)
+                save_disparity(disparity[:, :, 1, 1], "./logs/disp-$epoch-$i.png")
+                for l in 1:size(x, 4)
+                    xi = permutedims(cpu(x[:, :, :, l, 1]), (3, 2, 1))
+                    save("/home/pxl-th/projects/x-$epoch-$i-$l.png", colorview(RGB, xi))
+                end
+                @show length(warped), typeof(warped)
+                for sid in 1:length(warped)
+                    save_warped(warped[sid][:, :, :, 1], "/home/pxl-th/projects/w-$epoch-$i-$sid.png")
+                end
             end
-            if i % 101 == 0
+            if i % 31 == 0
                 model_host = model |> cpu
                 @save "./models/epoch-$epoch-iter-$i-loss-$loss_cpu.bson" model_host
             end
@@ -266,6 +266,6 @@ function eval()
     disparities = eval_disparity(model, x)
     save_disparity(disparities[end][:, :, 1, 1], "/home/pxl-th/d.png")
 end
-eval()
+# eval()
 
 end

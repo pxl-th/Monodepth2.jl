@@ -4,8 +4,8 @@ end
 Flux.@functor DecoderBlock
 function DecoderBlock(in_channels, skip_channels, out_channels)
     DecoderBlock(Chain(
-        Conv((3, 3), (in_channels + skip_channels)=>out_channels, elu; pad=1, bias=false),
-        Conv((3, 3), out_channels=>out_channels, elu; pad=1, bias=false)))
+        Conv((3, 3), (in_channels + skip_channels)=>out_channels, elu; pad=1),
+        Conv((3, 3), out_channels=>out_channels, elu; pad=1)))
 end
 function (block::DecoderBlock)(x, skip)
     o = upsample_bilinear(x, (2, 2))
@@ -27,7 +27,7 @@ function DepthDecoder(;encoder_channels, scale_levels)
         error("`scale_levels` should be at most of length 5 and have values in [1, 5] range.")
     end
 
-    decoder_channels = [256, 128, 64, 32, 16] # TODO parametrize
+    decoder_channels = [256, 128, 64, 32, 16]
     encoder_channels = encoder_channels[end:-1:1]
     head_channels = encoder_channels[1]
     in_channels = [head_channels, decoder_channels[1:end - 1]...]
@@ -36,7 +36,7 @@ function DepthDecoder(;encoder_channels, scale_levels)
     scale_convolutions_ids = Dict{Int64, Int64}(
         s => si for (si, s) in enumerate(scale_levels))
     scale_convolutions = [
-        Conv((3, 3), decoder_channels[s]=>1, σ; pad=1, bias=false) for s in scale_levels]
+        Conv((3, 3), decoder_channels[s]=>1, σ; pad=1) for s in scale_levels]
 
     bstart = 1
     partitions = Tuple{Int64, Int64}[]
