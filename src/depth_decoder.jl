@@ -1,18 +1,21 @@
-struct DecoderBlock{D}
-    decoder::D
+struct DecoderBlock{C1, C2}
+    c1::C1
+    c2::C2
 end
 Flux.@functor DecoderBlock
 function DecoderBlock(in_channels, skip_channels, out_channels)
-    DecoderBlock(Chain(
-        Conv((3, 3), (in_channels + skip_channels)=>out_channels, elu; pad=1),
-        Conv((3, 3), out_channels=>out_channels, elu; pad=1)))
+    c1 = Conv((3, 3), in_channels=>out_channels, elu; pad=1)
+    c2 = Conv((3, 3), (out_channels + skip_channels)=>out_channels, elu; pad=1)
+    DecoderBlock(c1, c2)
 end
+
 function (block::DecoderBlock)(x, skip)
-    o = upsample_bilinear(x, (2, 2))
+    o = block.c1(x)
+    o = upsample_nearest(o, (2, 2))
     if skip ≢ nothing
         o = cat(o, skip; dims=3)
     end
-    block.decoder(o)
+    block.c2(o)
 end
 
 struct DepthDecoder{P, S, D}

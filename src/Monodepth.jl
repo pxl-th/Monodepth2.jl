@@ -1,8 +1,7 @@
 module Monodepth
 
-using Plots
-gr()
-
+import BSON
+using BSON: @save, @load
 using StaticArrays
 using FileIO
 using ImageCore
@@ -11,19 +10,19 @@ using Printf
 using MLDataPattern: shuffleobs
 using DataLoaders
 using LinearAlgebra
+using Plots
+gr()
 
 using Rotations
 using Statistics
 import ChainRulesCore: rrule
 using ChainRulesCore
-using CUDA
 using Zygote
+using CUDA
 using Flux
 using EfficientNet
-CUDA.allowscalar(false)
 
-import BSON
-using BSON: @save, @load
+CUDA.allowscalar(false)
 
 include("kitty.jl")
 include("dtk.jl")
@@ -42,7 +41,9 @@ Base.@kwdef struct Params
     disparity_smoothness::Float64 = 1e-3
     frame_ids::Vector{Int64} = [1, 2, 3]
 
-    target_size::Tuple{Int64, Int64} = (128, 128) # width, height format TODO dataset
+    automasking::Bool = false
+
+    target_size::Tuple{Int64, Int64} # (width, height)
     batch_size::Int64 = 1
 end
 
@@ -58,19 +59,6 @@ struct TrainCache{S, B, P, K, I}
     target_pos_id::Int64
 end
 
-function photometric_loss(
-    ssim, predicted::AbstractArray{T}, target::AbstractArray{T}; α = T(0.85),
-) where T
-    l1_loss = mean(abs.(target .- predicted); dims=3)
-    ssim_loss = mean(ssim(predicted, target); dims=3)
-    α .* ssim_loss .+ (T(1.0) - α) .* l1_loss
-end
-
-automasking_loss(ssim, inputs, target; source_ids) =
-    minimum(cat(map(sid -> photometric_loss(ssim, inputs[sid], target), source_ids)...; dims=3); dims=3)
-prediction_loss(ssim, predictions, target) =
-    minimum(cat(map(p -> photometric_loss(ssim, p, target), predictions)...; dims=3); dims=3)
-
 function warp(
     disparity, inputs, Ps, backproject, project, invK, K;
     min_depth, max_depth, source_ids,
@@ -78,8 +66,8 @@ function warp(
     depth = disparity_to_depth(disparity, min_depth, max_depth)
     _, dw, dh, dn = size(depth)
     depth = reshape(depth, (1, dw * dh, dn))
-
     cam_coordinates = backproject(depth, invK)
+
     function _warp(i, sid)
         R, t = Ps[i]
         warped_uv = reshape(project(cam_coordinates, K, R, t), (2, dw, dh, dn))
@@ -97,6 +85,20 @@ function _get_transformation(rvec, t, invert)
     R, t
 end
 
+function photometric_loss(
+    ssim, predicted::AbstractArray{T}, target::AbstractArray{T}; α = T(0.85),
+) where T
+    l1_loss = mean(abs.(target .- predicted); dims=3)
+    ssim_loss = mean(ssim(predicted, target); dims=3)
+    α .* ssim_loss .+ (T(1.0) - α) .* l1_loss
+end
+
+@inline automasking_loss(ssim, inputs, target; source_ids) =
+    minimum(cat(map(sid -> photometric_loss(ssim, inputs[sid], target), source_ids)...; dims=3); dims=3)
+
+@inline prediction_loss(ssim, predictions, target) =
+    minimum(cat(map(p -> photometric_loss(ssim, p, target), predictions)...; dims=3); dims=3)
+
 function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, parameters::Params) where T
     loss = T(0.0)
     xs = map(i -> x[:, :, :, i, :], 1:length(parameters.frame_ids))
@@ -111,6 +113,8 @@ function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, paramet
         si[2] < train_cache.target_pos_id), enumerate(train_cache.source_ids))
 
     vis_warped = nothing
+    vis_loss = nothing
+
     for (i, scale) in enumerate(train_cache.scales)
         disparity = disparities[i]
         if i != length(train_cache.scales)
@@ -125,14 +129,19 @@ function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, paramet
             min_depth=parameters.min_depth, max_depth=parameters.max_depth,
             source_ids=train_cache.source_ids)
 
-        vis_warped = cpu.(warped_images)
+        vis_warped = cpu.(warped_images) # vis
 
-        auto_loss = automasking_loss(
-            train_cache.ssim, xs, xs[train_cache.target_pos_id]; source_ids=train_cache.source_ids)
-        pred_loss = prediction_loss(
+        warp_loss = prediction_loss(
             train_cache.ssim, warped_images, xs[train_cache.target_pos_id])
-        warp_loss = minimum(cat(auto_loss, pred_loss; dims=3); dims=3)
+        if parameters.automasking
+            auto_loss = automasking_loss(
+                train_cache.ssim, xs, xs[train_cache.target_pos_id];
+                source_ids=train_cache.source_ids)
+            warp_loss = minimum(cat(auto_loss, warp_loss; dims=3); dims=3)
+        end
         loss += mean(warp_loss)
+
+        vis_loss = cpu(warp_loss) # vis
 
         disparity = reshape(disparity, size(disparity)[2:end])
         disparity = disparity ./ (mean(disparity; dims=(1, 2)) .+ T(1e-7))
@@ -141,7 +150,7 @@ function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, paramet
         loss += disparity_loss
     end
 
-    loss / T(length(train_cache.scales)), cpu(disparities[end]), vis_warped
+    loss / T(length(train_cache.scales)), cpu(disparities[end]), vis_warped, vis_loss
 end
 
 function save_disparity(disparity, path)
@@ -161,7 +170,7 @@ function save_warped(warped, path)
     save(path, warped)
 end
 
-function nn()
+function train()
     device = cpu
     precision = f32
 
@@ -180,7 +189,6 @@ function nn()
 
     @show length(dataset)
     display(dataset.K); println()
-
     max_scale = 5
     scale_levels = collect(2:5)
 
@@ -192,6 +200,7 @@ function nn()
         push!(scales, scale)
         push!(scale_sizes, scale_size)
     end
+    @show scales
     @show scale_sizes
 
     # Transfer to the device.
@@ -205,7 +214,6 @@ function nn()
         ssim, backprojections, projections, Ks, invKs,
         scales, dataset.source_ids, dataset.target_pos_id)
 
-    # encoder = EfficientNet.from_pretrained("efficientnet-b0"; include_head=false)
     encoder = EffNet("efficientnet-b0"; include_head=false, in_channels=3)
     encoder_channels = collect(encoder.stages_channels)
     depth_decoder = DepthDecoder(;encoder_channels, scale_levels)
@@ -213,36 +221,37 @@ function nn()
     model = Model(encoder, depth_decoder, pose_decoder) |> precision |> device
 
     θ = model |> params
-    optimizer = ADAM(3e-4) |> precision
+    optimizer = ADAM(1e-4) |> precision
+
+    model |> trainmode! # TODO: switch to test mode once it is implemented
 
     for epoch in 1:100
         i = 0
         loader = DataLoader(shuffleobs(dataset), parameters.batch_size)
-        for images in loader
-        # for k in 1:1
-            x = images |> precision |> device
-            # x = Flux.unsqueeze(dataset[1], 5) |> precision |> device
 
-            model |> trainmode!
+        for images in loader
+            x = images |> precision |> device
+
             loss_cpu = 0.0
-            disparity = nothing
-            warped = nothing
+            disparity, warped, vis_loss = nothing, nothing, nothing
 
             @time ∇ = gradient(θ) do
-                loss, disparity, warped = train_loss(model, x, train_cache, parameters)
+                loss, disparity, warped, vis_loss = train_loss(model, x, train_cache, parameters)
                 loss_cpu = loss |> cpu
                 loss
             end
             Flux.Optimise.update!(optimizer, θ, ∇)
 
-            if i % 13 == 0
+            if i % 11 == 0
                 println("$epoch | $i | Loss: $loss_cpu")
                 save_disparity(disparity[:, :, 1, 1], "./logs/disp-$epoch-$i.png")
+
+                save("/home/pxl-th/projects/vl-$epoch-$i.png", permutedims(vis_loss[:, :, 1, 1], (2, 1)))
+
                 for l in 1:size(x, 4)
                     xi = permutedims(cpu(x[:, :, :, l, 1]), (3, 2, 1))
                     save("/home/pxl-th/projects/x-$epoch-$i-$l.png", colorview(RGB, xi))
                 end
-                @show length(warped), typeof(warped)
                 for sid in 1:length(warped)
                     save_warped(warped[sid][:, :, :, 1], "/home/pxl-th/projects/w-$epoch-$i-$sid.png")
                 end
@@ -255,7 +264,7 @@ function nn()
         end
     end
 end
-# nn()
+train()
 
 function eval()
     model_path = "/home/pxl-th/projects/Monodepth.jl/models/epoch-1-loss-0.10200599.bson"
