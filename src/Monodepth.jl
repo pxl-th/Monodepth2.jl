@@ -24,7 +24,6 @@ using EfficientNet
 
 CUDA.allowscalar(false)
 
-include("kitty.jl")
 include("dtk.jl")
 include("utils.jl")
 include("depth_decoder.jl")
@@ -44,7 +43,7 @@ Base.@kwdef struct Params
     automasking::Bool = false
 
     target_size::Tuple{Int64, Int64} # (width, height)
-    batch_size::Int64 = 1
+    batch_size::Int64
 end
 
 struct TrainCache{S, B, P, K, I}
@@ -170,42 +169,39 @@ function save_warped(warped, path)
     save(path, warped)
 end
 
-function train()
-    device = cpu
-    precision = f32
-
-    dataset = Depth10k("/home/pxl-th/projects/depth10k/imgs")
-    parameters = Params(;
-        min_depth=0.1, max_depth=100.0,
-        batch_size=1, disparity_smoothness=1e-3,
-        target_size=dataset.resolution)
-        # target_size=(224, 64))
-
-    # original_resolution = (1241, 376)
-    # dataset = KittyDataset(
-    #     "/home/pxl-th/Downloads/kitty-dataset", "00";
-    #     original_resolution, target_size=parameters.target_size,
-    #     frame_ids=parameters.frame_ids, n_frames=4541)
-
-    @show length(dataset)
-    display(dataset.K); println()
-    max_scale = 5
-    scale_levels = collect(2:5)
-
+function get_scales(max_scale, scale_levels, target_size)
     scales = Float64[]
     scale_sizes = Tuple{Int64, Int64}[]
     for scale_level in scale_levels
         scale = 1.0 / 2.0^(max_scale - scale_level)
-        scale_size = ceil.(Int64, parameters.target_size .* scale)
+        scale_size = ceil.(Int64, target_size .* scale)
         push!(scales, scale)
         push!(scale_sizes, scale_size)
     end
+    scales, scale_sizes
+end
+
+function train()
+    device = cpu
+    precision = f32
+
+    image_dir = "/home/pxl-th/projects/depth10k/imgs"
+    image_files = readlines("/home/pxl-th/projects/depth10k/trainable-nonstatic")
+    dataset = Depth10k(image_dir, image_files)
+    @show length(dataset)
+    display(dataset.K); println()
+
+    parameters = Params(; batch_size=1, target_size=dataset.resolution)
+    max_scale, scale_levels = 5, collect(2:5)
+    scales, scale_sizes = get_scales(max_scale, scale_levels, parameters.target_size)
     @show scales
     @show scale_sizes
 
     # Transfer to the device.
-    projections = device(precision(Project(; width=parameters.target_size[1], height=parameters.target_size[2])))
-    backprojections = device(precision(Backproject(; width=parameters.target_size[1], height=parameters.target_size[2])))
+    projections = device(precision(Project(;
+        width=parameters.target_size[1], height=parameters.target_size[2])))
+    backprojections = device(precision(Backproject(;
+        width=parameters.target_size[1], height=parameters.target_size[2])))
     Ks = device(precision(Array(dataset.K)))
     invKs = device(precision(inv(Array(dataset.K))))
     ssim = SSIM() |> precision |> device
@@ -264,7 +260,6 @@ function train()
         end
     end
 end
-train()
 
 function eval()
     model_path = "/home/pxl-th/projects/Monodepth.jl/models/epoch-1-loss-0.10200599.bson"
@@ -275,6 +270,22 @@ function eval()
     disparities = eval_disparity(model, x)
     save_disparity(disparities[end][:, :, 1, 1], "/home/pxl-th/d.png")
 end
+
+function refine_dtk()
+    image_dir = "/home/pxl-th/projects/depth10k/imgs"
+    image_files = readlines("/home/pxl-th/projects/depth10k/trainable")
+    dataset = Depth10k(image_dir, image_files)
+
+    non_staic = find_static(dataset)
+    open("trainable-nonstatic", "w") do io
+        for ns in non_staic
+            write(io, ns, "\n")
+        end
+    end
+end
+
+train()
 # eval()
+# refine_dtk()
 
 end
