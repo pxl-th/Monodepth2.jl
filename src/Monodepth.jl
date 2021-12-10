@@ -191,7 +191,7 @@ function train()
     @show length(dataset)
     display(dataset.K); println()
 
-    parameters = Params(; batch_size=1, target_size=dataset.resolution)
+    parameters = Params(; batch_size=3, target_size=dataset.resolution, disparity_smoothness=1e-2)
     max_scale, scale_levels = 5, collect(2:5)
     scales, scale_sizes = get_scales(max_scale, scale_levels, parameters.target_size)
     @show scales
@@ -218,13 +218,13 @@ function train()
 
     θ = model |> params
     optimizer = ADAM(1e-4) |> precision
-
     model |> trainmode! # TODO: switch to test mode once it is implemented
 
     for epoch in 1:100
         i = 0
         loader = DataLoader(shuffleobs(dataset), parameters.batch_size)
 
+        # TODO: use progress bar
         for images in loader
             x = images |> precision |> device
 

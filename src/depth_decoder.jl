@@ -10,19 +10,16 @@ function DecoderBlock(in_channels, skip_channels, out_channels)
 end
 
 function (block::DecoderBlock)(x, skip)
-    o = block.c1(x)
-    o = upsample_nearest(o, (2, 2))
+    o = upsample_nearest(block.c1(x), (2, 2))
     if skip ≢ nothing
         o = cat(o, skip; dims=3)
     end
     block.c2(o)
 end
 
-struct DepthDecoder{P, S, D}
-    partitions::P
-    scale_convolutions_ids::Dict{Int64, Int64}
-    scale_convolutions::Vector{S}
-    decoder_blocks::D
+struct DepthDecoder{B, D}
+    branches::B
+    decoders::D
 end
 Flux.@functor DepthDecoder
 function DepthDecoder(;encoder_channels, scale_levels)
@@ -36,41 +33,32 @@ function DepthDecoder(;encoder_channels, scale_levels)
     in_channels = [head_channels, decoder_channels[1:end - 1]...]
     skip_channels = [encoder_channels[2:end]..., 0]
 
-    scale_convolutions_ids = Dict{Int64, Int64}(
-        s => si for (si, s) in enumerate(scale_levels))
-    scale_convolutions = [
-        Conv((3, 3), decoder_channels[s]=>1, σ; pad=1) for s in scale_levels]
-
     bstart = 1
-    partitions = Tuple{Int64, Int64}[]
-    for scale_level in scale_levels
-        push!(partitions, (bstart, scale_level))
-        bstart = scale_level + 1
+    branches, decoders = [], []
+    for slevel in scale_levels
+        push!(branches, [
+            DecoderBlock(in_channels[bid], skip_channels[bid], decoder_channels[bid])
+            for bid in bstart:slevel])
+        push!(decoders, Conv((3, 3), decoder_channels[slevel]=>1, σ; pad=1))
+        bstart = slevel + 1
     end
-    partitions = tuple(partitions...)
-
-    decoder_blocks = [
-        DecoderBlock(inc, sc, oc)
-        for (inc, sc, oc) in zip(in_channels, skip_channels, decoder_channels)]
-    DepthDecoder(
-        partitions, scale_convolutions_ids, scale_convolutions, decoder_blocks)
+    DepthDecoder(branches, decoders)
 end
 
-function (decoder::DepthDecoder)(features)
-    features = features[end:-1:1]
-    head, skips = features[1], features[2:end]
-    x = head
+function (d::DepthDecoder)(features)
+    x, skips = features[end], features[(end - 1):-1:1]
 
-    function runner(block_range)
-        for i in (block_range[1]):(block_range[2])
-            skip = nothing
-            if i ≤ length(skips)
-                skip = skips[i]
-            end
-            x = decoder.decoder_blocks[i](x, skip)
-        end
-        sid = decoder.scale_convolutions_ids[block_range[end]]
-        decoder.scale_convolutions[sid](x)
+    bstart = 1
+    function runner(branch_id)
+        branch = d.branches[branch_id]
+        bend = bstart + length(branch) - 1
+        brange = bstart:bend
+        bstart = bend + 1
+
+        x = foldl(
+            (t, i) -> branch[i](t, brange[i] ≤ length(skips) ? skips[brange[i]] : nothing),
+            (x, 1:length(branch)...))
+        d.decoders[branch_id](x)
     end
-    map(runner, decoder.partitions)
+    map(runner, 1:length(d.branches))
 end
