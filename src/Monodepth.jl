@@ -1,20 +1,22 @@
 module Monodepth
 
+using LinearAlgebra
+using Printf
+using Statistics
+
 import BSON
 using BSON: @save, @load
-using StaticArrays
+using DataLoaders
 using FileIO
 using ImageCore
 using ImageTransformations
-using Printf
 using MLDataPattern: shuffleobs
-using DataLoaders
-using LinearAlgebra
+using ProgressMeter
 using Plots
+using StaticArrays
 gr()
 
 using Rotations
-using Statistics
 import ChainRulesCore: rrule
 using ChainRulesCore
 using Zygote
@@ -105,7 +107,6 @@ function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, paramet
     disparities, poses = model(
         x; source_ids=train_cache.source_ids, target_pos_id=train_cache.target_pos_id)
     rvecs, tvecs = poses # 3, 1, N
-    println(cpu(rvecs)[end][:, 1, 1], " | ", cpu(tvecs)[end][:, 1, 1])
 
     Ps = map(si -> _get_transformation(
         rvecs[si[1]][:, 1, :], tvecs[si[1]],
@@ -185,17 +186,22 @@ function train()
     device = cpu
     precision = f32
 
-    image_dir = "/home/pxl-th/projects/depth10k/imgs"
-    image_files = readlines("/home/pxl-th/projects/depth10k/trainable-nonstatic")
-    dataset = Depth10k(image_dir, image_files)
-    @show length(dataset)
-    display(dataset.K); println()
+    dtk_dir = "/home/pxl-th/projects/depth10k"
+    log_dir = "/home/pxl-th/projects/Monodepth.jl/logs"
+    save_dir = "/home/pxl-th/projects/Monodepth.jl/models"
 
-    parameters = Params(; batch_size=3, target_size=dataset.resolution, disparity_smoothness=1e-2)
+    isdir(log_dir) || mkdir(log_dir)
+    isdir(save_dir) || mkdir(save_dir)
+
+    image_dir = joinpath(dtk_dir, "imgs")
+    image_files = readlines(joinpath(dtk_dir, "trainable-nonstatic"))
+
+    dataset = Depth10k(image_dir, image_files)
+    parameters = Params(;
+        batch_size=3, target_size=dataset.resolution,
+        disparity_smoothness=1e-2, automasking=true)
     max_scale, scale_levels = 5, collect(2:5)
     scales, scale_sizes = get_scales(max_scale, scale_levels, parameters.target_size)
-    @show scales
-    @show scale_sizes
 
     # Transfer to the device.
     projections = device(precision(Project(;
@@ -220,46 +226,50 @@ function train()
     optimizer = ADAM(1e-4) |> precision
     model |> trainmode! # TODO: switch to test mode once it is implemented
 
-    for epoch in 1:100
-        i = 0
-        loader = DataLoader(shuffleobs(dataset), parameters.batch_size)
+    n_epochs = 20
+    log_iter, save_iter = 11, 31
 
-        # TODO: use progress bar
-        for images in loader
+    for epoch in 1:n_epochs
+        loader = DataLoader(shuffleobs(dataset), parameters.batch_size)
+        bar = get_pb(length(loader), "Epoch $epoch / $n_epochs: ")
+
+        for (i, images) in enumerate(loader)
             x = images |> precision |> device
 
             loss_cpu = 0.0
             disparity, warped, vis_loss = nothing, nothing, nothing
 
-            @time ∇ = gradient(θ) do
+            ∇ = gradient(θ) do
                 loss, disparity, warped, vis_loss = train_loss(model, x, train_cache, parameters)
                 loss_cpu = loss |> cpu
                 loss
             end
             Flux.Optimise.update!(optimizer, θ, ∇)
 
-            if i % 11 == 0
-                println("$epoch | $i | Loss: $loss_cpu")
-                save_disparity(disparity[:, :, 1, 1], "./logs/disp-$epoch-$i.png")
-
-                save("/home/pxl-th/projects/vl-$epoch-$i.png", permutedims(vis_loss[:, :, 1, 1], (2, 1)))
+            if i % log_iter == 0
+                save_disparity(disparity[:, :, 1, 1], joinpath(log_dir, "disp-$epoch-$i.png"))
+                save(joinpath(log_dir, "loss-$epoch-$i.png"), permutedims(vis_loss[:, :, 1, 1], (2, 1)))
 
                 for l in 1:size(x, 4)
                     xi = permutedims(cpu(x[:, :, :, l, 1]), (3, 2, 1))
-                    save("/home/pxl-th/projects/x-$epoch-$i-$l.png", colorview(RGB, xi))
+                    save(joinpath(log_dir, "x-$epoch-$i-$l.png"), colorview(RGB, xi))
                 end
                 for sid in 1:length(warped)
-                    save_warped(warped[sid][:, :, :, 1], "/home/pxl-th/projects/w-$epoch-$i-$sid.png")
+                    save_warped(warped[sid][:, :, :, 1], joinpath(log_dir, "warp-$epoch-$i-$sid.png"))
                 end
             end
-            if i % 31 == 0
-                model_host = model |> cpu
-                @save "./models/epoch-$epoch-iter-$i-loss-$loss_cpu.bson" model_host
+            if i % save_iter == 0
+                model_host = cpu(model)
+                @save joinpath(save_dir, "$epoch-$i-$loss_cpu.bson") model_host
             end
-            i += 1
+
+            next!(bar; showvalues=[(:i, i)])
         end
     end
 end
+
+get_pb(n, desc::String) = Progress(
+    n; desc, dt=1, barglyphs=BarGlyphs("[=> ]"), barlen=50, color=:white)
 
 function eval()
     model_path = "/home/pxl-th/projects/Monodepth.jl/models/epoch-1-loss-0.10200599.bson"
