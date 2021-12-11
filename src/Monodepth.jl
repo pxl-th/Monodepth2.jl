@@ -91,7 +91,7 @@ function photometric_loss(
 ) where T
     l1_loss = mean(abs.(target .- predicted); dims=3)
     ssim_loss = mean(ssim(predicted, target); dims=3)
-    α .* ssim_loss .+ (T(1.0) - α) .* l1_loss
+    α .* ssim_loss .+ (one(T) - α) .* l1_loss
 end
 
 @inline automasking_loss(ssim, inputs, target; source_ids) =
@@ -101,20 +101,20 @@ end
     minimum(cat(map(p -> photometric_loss(ssim, p, target), predictions)...; dims=3); dims=3)
 
 function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, parameters::Params) where T
-    loss = T(0.0)
+    # TODO get rid of xs? use only x
     xs = map(i -> x[:, :, :, i, :], 1:length(parameters.frame_ids))
-
     disparities, poses = model(
-        x; source_ids=train_cache.source_ids, target_pos_id=train_cache.target_pos_id)
+        x; source_ids=train_cache.source_ids,
+        target_pos_id=train_cache.target_pos_id)
     rvecs, tvecs = poses # 3, 1, N
 
     Ps = map(si -> _get_transformation(
         rvecs[si[1]][:, 1, :], tvecs[si[1]],
         si[2] < train_cache.target_pos_id), enumerate(train_cache.source_ids))
 
-    vis_warped = nothing
-    vis_loss = nothing
+    vis_warped, vis_loss = nothing, nothing
 
+    loss = T(0.0)
     for (i, scale) in enumerate(train_cache.scales)
         disparity = disparities[i]
         if i != length(train_cache.scales)
@@ -124,12 +124,12 @@ function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, paramet
         dw, dh, _, db = size(disparity)
         disparity = reshape(disparity, (1, dw, dh, db))
         warped_images = warp(
-            disparity, xs, Ps, train_cache.backprojections, train_cache.projections,
+            disparity, xs, Ps,
+            train_cache.backprojections, train_cache.projections,
             train_cache.invKs, train_cache.Ks;
-            min_depth=parameters.min_depth, max_depth=parameters.max_depth,
+            min_depth=parameters.min_depth,
+            max_depth=parameters.max_depth,
             source_ids=train_cache.source_ids)
-
-        vis_warped = cpu.(warped_images) # vis
 
         warp_loss = prediction_loss(
             train_cache.ssim, warped_images, xs[train_cache.target_pos_id])
@@ -141,13 +141,18 @@ function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, paramet
         end
         loss += mean(warp_loss)
 
-        vis_loss = cpu(warp_loss) # vis
-
         disparity = reshape(disparity, size(disparity)[2:end])
         disparity = disparity ./ (mean(disparity; dims=(1, 2)) .+ T(1e-7))
-        disparity_loss = smooth_loss(disparity, xs[train_cache.target_pos_id]) .*
+        disparity_loss =
+            smooth_loss(disparity, xs[train_cache.target_pos_id]) .*
             T(parameters.disparity_smoothness) .* T(scale)
         loss += disparity_loss
+
+        # Visualization.
+        if i == length(train_cache.scales)
+            vis_warped = cpu.(warped_images)
+            vis_loss = cpu(warp_loss)
+        end
     end
 
     loss / T(length(train_cache.scales)), cpu(disparities[end]), vis_warped, vis_loss
@@ -170,18 +175,6 @@ function save_warped(warped, path)
     save(path, warped)
 end
 
-function get_scales(max_scale, scale_levels, target_size)
-    scales = Float64[]
-    scale_sizes = Tuple{Int64, Int64}[]
-    for scale_level in scale_levels
-        scale = 1.0 / 2.0^(max_scale - scale_level)
-        scale_size = ceil.(Int64, target_size .* scale)
-        push!(scales, scale)
-        push!(scale_sizes, scale_size)
-    end
-    scales, scale_sizes
-end
-
 function train()
     device = cpu
     precision = f32
@@ -199,9 +192,11 @@ function train()
     dataset = Depth10k(image_dir, image_files)
     parameters = Params(;
         batch_size=3, target_size=dataset.resolution,
-        disparity_smoothness=1e-2, automasking=true)
+        disparity_smoothness=1e-3, automasking=true)
     max_scale, scale_levels = 5, collect(2:5)
-    scales, scale_sizes = get_scales(max_scale, scale_levels, parameters.target_size)
+    scales = [1.0 / 2.0^(max_scale - slevel) for slevel in scale_levels]
+
+    println("Batch size: $(parameters.batch_size)")
 
     # Transfer to the device.
     projections = device(precision(Project(;
@@ -210,7 +205,7 @@ function train()
         width=parameters.target_size[1], height=parameters.target_size[2])))
     Ks = device(precision(Array(dataset.K)))
     invKs = device(precision(inv(Array(dataset.K))))
-    ssim = SSIM() |> precision |> device
+    ssim = device(precision(SSIM()))
 
     train_cache = TrainCache(
         ssim, backprojections, projections, Ks, invKs,
@@ -220,11 +215,11 @@ function train()
     encoder_channels = collect(encoder.stages_channels)
     depth_decoder = DepthDecoder(;encoder_channels, scale_levels)
     pose_decoder = PoseDecoder(encoder_channels[end], 2, 1)
-    model = Model(encoder, depth_decoder, pose_decoder) |> precision |> device
+    model = device(precision(Model(encoder, depth_decoder, pose_decoder)))
 
-    θ = model |> params
-    optimizer = ADAM(1e-4) |> precision
-    model |> trainmode! # TODO: switch to test mode once it is implemented
+    θ = params(model)
+    optimizer = ADAM(1e-4)
+    trainmode!(model) # TODO: switch to test mode once it is implemented
 
     n_epochs = 20
     log_iter, save_iter = 11, 31
@@ -234,14 +229,14 @@ function train()
         bar = get_pb(length(loader), "Epoch $epoch / $n_epochs: ")
 
         for (i, images) in enumerate(loader)
-            x = images |> precision |> device
+            x = device(precision(images))
 
             loss_cpu = 0.0
             disparity, warped, vis_loss = nothing, nothing, nothing
 
             ∇ = gradient(θ) do
                 loss, disparity, warped, vis_loss = train_loss(model, x, train_cache, parameters)
-                loss_cpu = loss |> cpu
+                loss_cpu = cpu(loss)
                 loss
             end
             Flux.Optimise.update!(optimizer, θ, ∇)
@@ -263,7 +258,7 @@ function train()
                 @save joinpath(save_dir, "$epoch-$i-$loss_cpu.bson") model_host
             end
 
-            next!(bar; showvalues=[(:i, i)])
+            next!(bar; showvalues=[(:i, i), (:loss, loss_cpu)])
         end
     end
 end
