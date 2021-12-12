@@ -23,6 +23,7 @@ using Zygote
 using CUDA
 using Flux
 using EfficientNet
+using ResNet
 
 CUDA.allowscalar(false)
 
@@ -196,7 +197,7 @@ function train()
     max_scale, scale_levels = 5, collect(2:5)
     scales = [1.0 / 2.0^(max_scale - slevel) for slevel in scale_levels]
 
-    println("Batch size: $(parameters.batch_size)")
+    display(parameters); println()
 
     # Transfer to the device.
     projections = device(precision(Project(;
@@ -211,8 +212,10 @@ function train()
         ssim, backprojections, projections, Ks, invKs,
         scales, dataset.source_ids, dataset.target_pos_id)
 
-    encoder = EffNet("efficientnet-b0"; include_head=false, in_channels=3)
-    encoder_channels = collect(encoder.stages_channels)
+    encoder = ResidualNetwork(18; in_channels=3, classes=nothing)
+    encoder_channels = collect(encoder.stages)
+    # encoder = EffNet("efficientnet-b0"; include_head=false, in_channels=3)
+    # encoder_channels = collect(encoder.stages_channels)
     depth_decoder = DepthDecoder(;encoder_channels, scale_levels)
     pose_decoder = PoseDecoder(encoder_channels[end], 2, 1)
     model = device(precision(Model(encoder, depth_decoder, pose_decoder)))

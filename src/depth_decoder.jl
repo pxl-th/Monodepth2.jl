@@ -4,18 +4,15 @@ struct DecoderBlock{C1, C2}
 end
 Flux.@functor DecoderBlock
 function DecoderBlock(in_channels, skip_channels, out_channels)
-    c1 = Conv((3, 3), in_channels=>out_channels, relu; pad=1)
-    c2 = Conv((3, 3), (out_channels + skip_channels)=>out_channels, relu; pad=1)
+    c1 = Conv((3, 3), in_channels=>out_channels, elu; pad=1)
+    c2 = Conv((3, 3), (out_channels + skip_channels)=>out_channels, elu; pad=1)
     DecoderBlock(c1, c2)
 end
 
-function (block::DecoderBlock)(x, skip)
-    o = upsample_nearest(block.c1(x), (2, 2))
-    if skip ≢ nothing
-        o = cat(o, skip; dims=3)
-    end
-    block.c2(o)
-end
+(block::DecoderBlock)(x, ::Nothing) =
+    block.c2(upsample_nearest(block.c1(x), (2, 2)))
+(block::DecoderBlock)(x, skip) =
+    block.c2(cat(upsample_nearest(block.c1(x), (2, 2)), skip; dims=3))
 
 struct DepthDecoder{B, D}
     branches::B
