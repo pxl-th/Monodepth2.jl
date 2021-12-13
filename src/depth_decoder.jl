@@ -1,18 +1,22 @@
-struct DecoderBlock{C1, C2}
+struct DecoderBlock{D}
+    d::D
+end
+Flux.@functor DecoderBlock
+(block::DecoderBlock)(x) = block.d(pad_reflect(x, 1))
+
+struct BranchBlock{C1, C2}
     c1::C1
     c2::C2
 end
-Flux.@functor DecoderBlock
-function DecoderBlock(in_channels, skip_channels, out_channels)
-    c1 = Conv((3, 3), in_channels=>out_channels, elu; pad=1)
-    c2 = Conv((3, 3), (out_channels + skip_channels)=>out_channels, elu; pad=1)
-    DecoderBlock(c1, c2)
+Flux.@functor BranchBlock
+function BranchBlock(in_channels, skip_channels, out_channels)
+    c1 = DecoderBlock(Conv((3, 3), in_channels=>out_channels, elu))
+    c2 = DecoderBlock(Conv((3, 3), (out_channels + skip_channels)=>out_channels, elu))
+    BranchBlock(c1, c2)
 end
 
-(block::DecoderBlock)(x, ::Nothing) =
-    block.c2(upsample_nearest(block.c1(x), (2, 2)))
-(block::DecoderBlock)(x, skip) =
-    block.c2(cat(upsample_nearest(block.c1(x), (2, 2)), skip; dims=3))
+(b::BranchBlock)(x, ::Nothing) = b.c2(upsample_bilinear(b.c1(x), (2, 2)))
+(b::BranchBlock)(x, skip) = b.c2(cat(upsample_bilinear(b.c1(x), (2, 2)), skip; dims=3))
 
 struct DepthDecoder{B, D}
     branches::B
@@ -34,9 +38,9 @@ function DepthDecoder(;encoder_channels, scale_levels)
     branches, decoders = [], []
     for slevel in scale_levels
         push!(branches, [
-            DecoderBlock(in_channels[bid], skip_channels[bid], decoder_channels[bid])
+            BranchBlock(in_channels[bid], skip_channels[bid], decoder_channels[bid])
             for bid in bstart:slevel])
-        push!(decoders, Conv((3, 3), decoder_channels[slevel]=>1, σ; pad=1))
+        push!(decoders, DecoderBlock(Conv((3, 3), decoder_channels[slevel]=>1, σ)))
         bstart = slevel + 1
     end
     DepthDecoder(branches, decoders)

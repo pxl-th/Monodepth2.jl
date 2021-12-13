@@ -4,6 +4,7 @@ using LinearAlgebra
 using Printf
 using Statistics
 
+using Augmentations
 import BSON
 using BSON: @save, @load
 using DataLoaders
@@ -16,7 +17,6 @@ using Plots
 using StaticArrays
 gr()
 
-using Rotations
 import ChainRulesCore: rrule
 using ChainRulesCore
 using Zygote
@@ -43,7 +43,7 @@ Base.@kwdef struct Params
     disparity_smoothness::Float64 = 1e-3
     frame_ids::Vector{Int64} = [1, 2, 3]
 
-    automasking::Bool = false
+    automasking::Bool = true
 
     target_size::Tuple{Int64, Int64} # (width, height)
     batch_size::Int64
@@ -62,7 +62,7 @@ struct TrainCache{S, B, P, K, I}
 end
 
 function warp(
-    disparity, inputs, Ps, backproject, project, invK, K;
+    disparity, x, Ps, backproject, project, invK, K;
     min_depth, max_depth, source_ids,
 )
     depth = disparity_to_depth(disparity, min_depth, max_depth)
@@ -70,12 +70,12 @@ function warp(
     depth = reshape(depth, (1, dw * dh, dn))
     cam_coordinates = backproject(depth, invK)
 
-    function _warp(i, sid)
-        R, t = Ps[i]
+    function _warp(wid)
+        R, t = Ps[wid[1]]
         warped_uv = reshape(project(cam_coordinates, K, R, t), (2, dw, dh, dn))
-        grid_sample(inputs[sid], warped_uv; padding_mode=:border)
+        grid_sample(x[:, :, :, wid[2], :], warped_uv; padding_mode=:border)
     end
-    map(si -> _warp(si[1], si[2]), enumerate(source_ids))
+    map(_warp, enumerate(source_ids))
 end
 
 function _get_transformation(rvec, t, invert)
@@ -95,15 +95,18 @@ function photometric_loss(
     α .* ssim_loss .+ (one(T) - α) .* l1_loss
 end
 
-@inline automasking_loss(ssim, inputs, target; source_ids) =
-    minimum(cat(map(sid -> photometric_loss(ssim, inputs[sid], target), source_ids)...; dims=3); dims=3)
+@inline function automasking_loss(ssim, inputs, target; source_ids)
+    loss = map(i -> photometric_loss(ssim, @view(inputs[:, :, :, i, :]), target), source_ids)
+    minimum(cat(loss...; dims=3); dims=3)
+end
 
 @inline prediction_loss(ssim, predictions, target) =
     minimum(cat(map(p -> photometric_loss(ssim, p, target), predictions)...; dims=3); dims=3)
 
-function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, parameters::Params) where T
-    # TODO get rid of xs? use only x
-    xs = map(i -> x[:, :, :, i, :], 1:length(parameters.frame_ids))
+function train_loss(
+    model, x::AbstractArray{T}, auto_loss, train_cache::TrainCache, parameters::Params,
+) where T
+    target_x = x[:, :, :, train_cache.target_pos_id, :]
     disparities, poses = model(
         x; source_ids=train_cache.source_ids,
         target_pos_id=train_cache.target_pos_id)
@@ -115,7 +118,7 @@ function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, paramet
 
     vis_warped, vis_loss = nothing, nothing
 
-    loss = T(0.0)
+    loss = zero(T)
     for (i, scale) in enumerate(train_cache.scales)
         disparity = disparities[i]
         if i != length(train_cache.scales)
@@ -125,31 +128,23 @@ function train_loss(model, x::AbstractArray{T}, train_cache::TrainCache, paramet
         dw, dh, _, db = size(disparity)
         disparity = reshape(disparity, (1, dw, dh, db))
         warped_images = warp(
-            disparity, xs, Ps,
+            disparity, x, Ps,
             train_cache.backprojections, train_cache.projections,
             train_cache.invKs, train_cache.Ks;
-            min_depth=parameters.min_depth,
-            max_depth=parameters.max_depth,
+            min_depth=parameters.min_depth, max_depth=parameters.max_depth,
             source_ids=train_cache.source_ids)
 
-        warp_loss = prediction_loss(
-            train_cache.ssim, warped_images, xs[train_cache.target_pos_id])
+        warp_loss = prediction_loss(train_cache.ssim, warped_images, target_x)
         if parameters.automasking
-            auto_loss = automasking_loss(
-                train_cache.ssim, xs, xs[train_cache.target_pos_id];
-                source_ids=train_cache.source_ids)
             warp_loss = minimum(cat(auto_loss, warp_loss; dims=3); dims=3)
         end
         loss += mean(warp_loss)
 
         disparity = reshape(disparity, size(disparity)[2:end])
         disparity = disparity ./ (mean(disparity; dims=(1, 2)) .+ T(1e-7))
-        disparity_loss =
-            smooth_loss(disparity, xs[train_cache.target_pos_id]) .*
-            T(parameters.disparity_smoothness) .* T(scale)
+        disparity_loss = smooth_loss(disparity, target_x) .* T(parameters.disparity_smoothness) .* T(scale)
         loss += disparity_loss
 
-        # Visualization.
         if i == length(train_cache.scales)
             vis_warped = cpu.(warped_images)
             vis_loss = cpu(warp_loss)
@@ -177,12 +172,12 @@ function save_warped(warped, path)
 end
 
 function train()
-    device = cpu
+    device = gpu
     precision = f32
 
-    dtk_dir = "/home/pxl-th/projects/depth10k"
-    log_dir = "/home/pxl-th/projects/Monodepth.jl/logs"
-    save_dir = "/home/pxl-th/projects/Monodepth.jl/models"
+    dtk_dir = "/home/pxl-th/projects/datasets/depth10k"
+    log_dir = "/home/pxl-th/projects/Monodepth2.jl/logs"
+    save_dir = "/home/pxl-th/projects/Monodepth2.jl/models"
 
     isdir(log_dir) || mkdir(log_dir)
     isdir(save_dir) || mkdir(save_dir)
@@ -190,9 +185,10 @@ function train()
     image_dir = joinpath(dtk_dir, "imgs")
     image_files = readlines(joinpath(dtk_dir, "trainable-nonstatic"))
 
-    dataset = Depth10k(image_dir, image_files)
+    flip_augmentation = FlipX(0.5)
+    dataset = Depth10k(image_dir, image_files; flip_augmentation)
     parameters = Params(;
-        batch_size=3, target_size=dataset.resolution,
+        batch_size=2, target_size=dataset.resolution,
         disparity_smoothness=1e-3, automasking=true)
     max_scale, scale_levels = 5, collect(2:5)
     scales = [1.0 / 2.0^(max_scale - slevel) for slevel in scale_levels]
@@ -225,33 +221,43 @@ function train()
     trainmode!(model) # TODO: switch to test mode once it is implemented
 
     n_epochs = 20
-    log_iter, save_iter = 11, 31
+    log_iter, save_iter = 31, 250
 
     for epoch in 1:n_epochs
         loader = DataLoader(shuffleobs(dataset), parameters.batch_size)
         bar = get_pb(length(loader), "Epoch $epoch / $n_epochs: ")
 
         for (i, images) in enumerate(loader)
-            x = device(precision(images))
+            x = precision(images)
+
+            auto_loss = nothing
+            if parameters.automasking
+                auto_loss = automasking_loss(
+                    train_cache.ssim, x,
+                    @view(x[:, :, :, train_cache.target_pos_id, :]);
+                    source_ids=train_cache.source_ids) |> device
+            end
+
+            x = device(x)
 
             loss_cpu = 0.0
             disparity, warped, vis_loss = nothing, nothing, nothing
 
-            ∇ = gradient(θ) do
-                loss, disparity, warped, vis_loss = train_loss(model, x, train_cache, parameters)
+            Flux.Optimise.update!(optimizer, θ, gradient(θ) do
+                loss, disparity, warped, vis_loss = train_loss(
+                    model, x, auto_loss, train_cache, parameters)
                 loss_cpu = cpu(loss)
                 loss
-            end
-            Flux.Optimise.update!(optimizer, θ, ∇)
+            end)
 
             if i % log_iter == 0
                 save_disparity(disparity[:, :, 1, 1], joinpath(log_dir, "disp-$epoch-$i.png"))
                 save(joinpath(log_dir, "loss-$epoch-$i.png"), permutedims(vis_loss[:, :, 1, 1], (2, 1)))
 
-                for l in 1:size(x, 4)
-                    xi = permutedims(cpu(x[:, :, :, l, 1]), (3, 2, 1))
-                    save(joinpath(log_dir, "x-$epoch-$i-$l.png"), colorview(RGB, xi))
-                end
+                # for l in 1:size(x, 4)
+                #     xi = permutedims(cpu(x[:, :, :, l, 1]), (3, 2, 1))
+                #     save(joinpath(log_dir, "x-$epoch-$i-$l.png"), colorview(RGB, xi))
+                # end
                 for sid in 1:length(warped)
                     save_warped(warped[sid][:, :, :, 1], joinpath(log_dir, "warp-$epoch-$i-$sid.png"))
                 end
@@ -270,22 +276,28 @@ get_pb(n, desc::String) = Progress(
     n; desc, dt=1, barglyphs=BarGlyphs("[=> ]"), barlen=50, color=:white)
 
 function eval()
-    model_path = "/home/pxl-th/projects/Monodepth.jl/models/epoch-1-loss-0.10200599.bson"
-    model = BSON.load(model_path, @__MODULE__)[:model_host]
+    dtk_dir = "/home/pxl-th/projects/datasets/depth10k"
+    image_dir = joinpath(dtk_dir, "imgs")
+    image_files = readlines(joinpath(dtk_dir, "trainable-nonstatic"))
+    dataset = Depth10k(image_dir, image_files)
 
-    dataset = Depth10k("/home/pxl-th/projects/depth10k/imgs")
+    model_path = "/home/pxl-th/projects/Monodepth2.jl/models/epoch-1-loss-0.10200599.bson"
+    model = BSON.load(model_path, @__MODULE__)[:model_host]
+    model = model |> testmode!
+
     x = dataset[1][:, :, :, [dataset.target_pos_id]]
     disparities = eval_disparity(model, x)
     save_disparity(disparities[end][:, :, 1, 1], "/home/pxl-th/d.png")
 end
 
 function refine_dtk()
-    image_dir = "/home/pxl-th/projects/depth10k/imgs"
-    image_files = readlines("/home/pxl-th/projects/depth10k/trainable")
+    dtk_dir = "/home/pxl-th/projects/datasets/depth10k"
+    image_dir = joinpath(dtk_dir, "imgs")
+    image_files = readlines(joinpath(dtk_dir, "trainable"))
     dataset = Depth10k(image_dir, image_files)
 
     non_staic = find_static(dataset)
-    open("trainable-nonstatic", "w") do io
+    open(joinpath(dtk_dir, "trainable-nonstatic"), "w") do io
         for ns in non_staic
             write(io, ns, "\n")
         end
