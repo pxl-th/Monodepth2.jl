@@ -96,7 +96,7 @@ function photometric_loss(
 end
 
 @inline function automasking_loss(ssim, inputs, target; source_ids)
-    loss = map(i -> photometric_loss(ssim, @view(inputs[:, :, :, i, :]), target), source_ids)
+    loss = map(i -> photometric_loss(ssim, inputs[:, :, :, i, :], target), source_ids)
     minimum(cat(loss...; dims=3); dims=3)
 end
 
@@ -208,10 +208,10 @@ function train()
         ssim, backprojections, projections, Ks, invKs,
         scales, dataset.source_ids, dataset.target_pos_id)
 
-    encoder = ResidualNetwork(18; in_channels=3, classes=nothing)
-    encoder_channels = collect(encoder.stages)
-    # encoder = EffNet("efficientnet-b0"; include_head=false, in_channels=3)
-    # encoder_channels = collect(encoder.stages_channels)
+    # encoder = ResidualNetwork(18; in_channels=3, classes=nothing)
+    # encoder_channels = collect(encoder.stages)
+    encoder = EffNet("efficientnet-b0"; include_head=false, in_channels=3)
+    encoder_channels = collect(encoder.stages_channels)
     depth_decoder = DepthDecoder(;encoder_channels, scale_levels)
     pose_decoder = PoseDecoder(encoder_channels[end], 2, 1)
     model = device(precision(Model(encoder, depth_decoder, pose_decoder)))
@@ -228,17 +228,14 @@ function train()
         bar = get_pb(length(loader), "Epoch $epoch / $n_epochs: ")
 
         for (i, images) in enumerate(loader)
-            x = precision(images)
+            x = device(precision(images))
 
             auto_loss = nothing
             if parameters.automasking
                 auto_loss = automasking_loss(
-                    train_cache.ssim, x,
-                    @view(x[:, :, :, train_cache.target_pos_id, :]);
-                    source_ids=train_cache.source_ids) |> device
+                    train_cache.ssim, x, x[:, :, :, train_cache.target_pos_id, :];
+                    source_ids=train_cache.source_ids)
             end
-
-            x = device(x)
 
             loss_cpu = 0.0
             disparity, warped, vis_loss = nothing, nothing, nothing
