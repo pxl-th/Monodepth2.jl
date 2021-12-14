@@ -23,14 +23,15 @@ function (ssim::SSIM)(x::AbstractArray{T}, y) where T
     x_ref, y_ref = pad_reflect(x, 1), pad_reflect(y, 1)
     μx, μy = ssim.pool(x_ref), ssim.pool(y_ref)
 
-    σx = ssim.pool(x_ref .^ 2) .- μx .^ 2
-    σy = ssim.pool(y_ref .^ 2) .- μy .^ 2
+    two, c1, c2 = T(2.0), T(ssim.c1), T(ssim.c2)
+
+    σx = ssim.pool(x_ref .^ two) .- μx .^ two
+    σy = ssim.pool(y_ref .^ two) .- μy .^ two
     σxy = ssim.pool(x_ref .* y_ref) .- μx .* μy
 
-    c1, c2 = T(ssim.c1), T(ssim.c2)
-    ssim_n = (T(2.0) .* μx .* μy .+ c1) .* (T(2.0) .* σxy .+ c2)
-    ssim_d = (μx .^ 2 .+ μy .^ 2 .+ c1) .* (σx .+ σy .+ c2)
-    clamp.((T(1.0) .- ssim_n ./ ssim_d) .* T(0.5), T(0.0), T(1.0))
+    ssim_n = (two .* μx .* μy .+ c1) .* (two .* σxy .+ two)
+    ssim_d = (μx .^ two .+ μy .^ two .+ c1) .* (σx .+ σy .+ two)
+    clamp.((one(T) .- ssim_n ./ ssim_d) .* T(0.5), zero(T), one(T))
 end
 
 struct Backproject{C}
@@ -73,7 +74,7 @@ Assumes pixels coordinates start at `(1, 1)` and end at `(width, height)`.
 Normalizes coordinates to be in `(-1, 1)` range.
 """
 function normalize(p::Project, pixels::AbstractArray{T}) where T
-    (((pixels .- T(1.0)) ./ p.normalizer) .- T(0.5)) .* T(2.0)
+    (((pixels .- one(T)) ./ p.normalizer) .- T(0.5)) .* T(2.0)
 end
 
 """
@@ -90,7 +91,7 @@ Normalized projected coordinates in `(-1, 1)` range.
 """
 function (p::Project)(points::AbstractArray{V}, K, R, t) where V
     camera_points = K ⊠ ((R ⊠ points) .+ t)
-    denom = V(1.0) ./ (camera_points[[3], :, :] .+ V(1e-7))
+    denom = one(V) ./ (camera_points[[3], :, :] .+ V(1e-7))
     normalize(p, camera_points[1:2, :, :] .* denom)
 end
 
@@ -106,7 +107,7 @@ function compose_rotation(rvec)
     cosθ = reshape(cos.(θ), (1, 1, N))
     sinθ = reshape(sin.(θ), (1, 1, N))
 
-    rvec ⊠ permutedims(rvec, (2, 1, 3)) .* (T(1.0) .- cosθ) .+ # 3x3xN
+    rvec ⊠ permutedims(rvec, (2, 1, 3)) .* (one(T) .- cosθ) .+ # 3x3xN
         cosθ .* eye_like(rvec, (3, 3)) .+ sinθ .* S
 end
 
@@ -164,5 +165,5 @@ end
 function disparity_to_depth(disparity::AbstractArray{T}, min_depth, max_depth) where T
     min_disp = T(1.0 / max_depth)
     max_disp = T(1.0 / min_depth)
-    T(1.0) ./ (disparity .* (max_disp - min_disp) .+ min_disp)
+    one(T) ./ (disparity .* (max_disp - min_disp) .+ min_disp)
 end
