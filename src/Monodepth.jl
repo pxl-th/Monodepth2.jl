@@ -95,10 +95,8 @@ function photometric_loss(
     α .* ssim_loss .+ (one(T) - α) .* l1_loss
 end
 
-@inline function automasking_loss(ssim, inputs, target; source_ids)
-    loss = map(i -> photometric_loss(ssim, inputs[:, :, :, i, :], target), source_ids)
-    minimum(cat(loss...; dims=3); dims=3)
-end
+@inline automasking_loss(ssim, inputs, target; source_ids) =
+    minimum(cat(map(i -> photometric_loss(ssim, inputs[:, :, :, i, :], target), source_ids)...; dims=3); dims=3)
 
 @inline prediction_loss(ssim, predictions, target) =
     minimum(cat(map(p -> photometric_loss(ssim, p, target), predictions)...; dims=3); dims=3)
@@ -185,11 +183,13 @@ function train()
     image_dir = joinpath(dtk_dir, "imgs")
     image_files = readlines(joinpath(dtk_dir, "trainable-nonstatic"))
 
-    flip_augmentation = FlipX(0.5)
+    flip_augmentation = Sequential([
+        FlipX(0.5),
+        OneOf(0.2, [ToGray(1), Downscale(1, (0.4, 0.75)), Blur(;p=1)])])
     dataset = Depth10k(image_dir, image_files; flip_augmentation)
     parameters = Params(;
         batch_size=2, target_size=dataset.resolution,
-        disparity_smoothness=1e-3, automasking=false)
+        disparity_smoothness=1e-3, automasking=true)
     max_scale, scale_levels = 5, collect(2:5)
     scales = [1.0 / 2.0^(max_scale - slevel) for slevel in scale_levels]
 
@@ -228,14 +228,16 @@ function train()
         bar = get_pb(length(loader), "Epoch $epoch / $n_epochs: ")
 
         for (i, images) in enumerate(loader)
-            x = device(precision(images))
+            x = precision(images)
 
             auto_loss = nothing
             if parameters.automasking
                 auto_loss = automasking_loss(
                     train_cache.ssim, x, x[:, :, :, train_cache.target_pos_id, :];
-                    source_ids=train_cache.source_ids)
+                    source_ids=train_cache.source_ids) |> device
             end
+
+            x = device(x)
 
             loss_cpu = 0.0
             disparity, warped, vis_loss = nothing, nothing, nothing
@@ -293,7 +295,7 @@ function refine_dtk()
     image_files = readlines(joinpath(dtk_dir, "trainable"))
     dataset = Depth10k(image_dir, image_files)
 
-    non_staic = find_static(dataset)
+    non_staic = find_static(dataset, 0.03)
     open(joinpath(dtk_dir, "trainable-nonstatic"), "w") do io
         for ns in non_staic
             write(io, ns, "\n")
@@ -304,5 +306,9 @@ end
 train()
 # eval()
 # refine_dtk()
+
+# TODO
+# - evaluation on video
+# - make pose prediction optional
 
 end

@@ -1,4 +1,4 @@
-struct Depth10k
+struct Depth10k{A}
     K::SMatrix{3, 3, Float64, 9}
     dir::String
     files::Vector{String}
@@ -7,7 +7,7 @@ struct Depth10k
     source_ids::Vector{Int64}
     target_pos_id::Int64
 
-    flip_augmentation::Union{Augmentations.FlipX, Nothing}
+    flip_augmentation::A
 end
 function Depth10k(image_dir, image_files; flip_augmentation = nothing)
     focal = 2648.0 / 4.63461538462
@@ -28,25 +28,29 @@ function Base.getindex(d::Depth10k, i)
     if d.flip_augmentation ≢ nothing
         frames = d.flip_augmentation(frames)
     end
-    permutedims(cat(channelview.(frames)...; dims=4), (3, 2, 1, 4))
+    frames = cat(channelview.(frames)...; dims=4)
+    Float32.(permutedims(frames, (3, 2, 1, 4)))
 end
 
 @inline DataLoaders.nobs(d::Depth10k) = length(d.files)
 @inline DataLoaders.getobs(d::Depth10k, i) = d[i]
 
-function find_static(dataset::Depth10k)
+function find_static(dataset::Depth10k, α)
     ssim = SSIM()
     non_static = String[]
+    bar = get_pb(length(dataset), "Detecting static: ")
     for i in 1:length(dataset)
         x = dataset[i]
-        xs = map(i -> x[:, :, :, [i]], 1:(length(dataset.source_ids) + 1))
+        x = Flux.unsqueeze(x, 5)
+
         auto_loss = mean(automasking_loss(
-            ssim, xs, xs[dataset.target_pos_id]; source_ids=dataset.source_ids))
-        if auto_loss > 0.02
-            println(i, " - ", auto_loss)
+            ssim, x, x[:, :, :, dataset.target_pos_id, :];
+            source_ids=dataset.source_ids))
+        if auto_loss > α
             push!(non_static, dataset.files[i])
         end
+        next!(bar; showvalues=[
+            (:loss, auto_loss), (:non_static, length(non_static))])
     end
-    @info "Non-static amount: $(length(non_static))"
     non_static
 end

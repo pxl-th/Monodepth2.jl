@@ -25,12 +25,12 @@ function (ssim::SSIM)(x::AbstractArray{T}, y) where T
 
     two, c1, c2 = T(2.0), T(ssim.c1), T(ssim.c2)
 
-    σx = ssim.pool(x_ref .^ two) .- μx .^ two
-    σy = ssim.pool(y_ref .^ two) .- μy .^ two
+    σx = ssim.pool(x_ref .* x_ref) .- μx .* μx
+    σy = ssim.pool(y_ref .* y_ref) .- μy .* μy
     σxy = ssim.pool(x_ref .* y_ref) .- μx .* μy
 
-    ssim_n = (two .* μx .* μy .+ c1) .* (two .* σxy .+ two)
-    ssim_d = (μx .^ two .+ μy .^ two .+ c1) .* (σx .+ σy .+ two)
+    ssim_n = (two .* μx .* μy .+ c1) .* (two .* σxy .+ c2)
+    ssim_d = (μx .* μx .+ μy .* μy .+ c1) .* (σx .+ σy .+ c2)
     clamp.((one(T) .- ssim_n ./ ssim_d) .* T(0.5), zero(T), one(T))
 end
 
