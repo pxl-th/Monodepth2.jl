@@ -189,11 +189,11 @@ function train()
     dataset = Depth10k(image_dir, image_files; flip_augmentation)
     parameters = Params(;
         batch_size=2, target_size=dataset.resolution,
-        disparity_smoothness=1e-3, automasking=true)
+        disparity_smoothness=1e-3, automasking=false)
     max_scale, scale_levels = 5, collect(2:5)
     scales = [1.0 / 2.0^(max_scale - slevel) for slevel in scale_levels]
 
-    display(parameters); println()
+    println(parameters)
 
     # Transfer to the device.
     projections = device(precision(Project(;
@@ -208,12 +208,12 @@ function train()
         ssim, backprojections, projections, Ks, invKs,
         scales, dataset.source_ids, dataset.target_pos_id)
 
-    # encoder = ResidualNetwork(18; in_channels=3, classes=nothing)
-    # encoder_channels = collect(encoder.stages)
-    encoder = EffNet("efficientnet-b0"; include_head=false, in_channels=3)
-    encoder_channels = collect(encoder.stages_channels)
+    encoder = ResidualNetwork(18; in_channels=3, classes=nothing)
+    encoder_channels = collect(encoder.stages)
+    # encoder = EffNet("efficientnet-b0"; include_head=false, in_channels=3)
+    # encoder_channels = collect(encoder.stages_channels)
     depth_decoder = DepthDecoder(;encoder_channels, scale_levels)
-    pose_decoder = PoseDecoder(encoder_channels[end], 2, 1)
+    pose_decoder = PoseDecoder(encoder_channels[end])
     model = device(precision(Model(encoder, depth_decoder, pose_decoder)))
 
     θ = params(model)
