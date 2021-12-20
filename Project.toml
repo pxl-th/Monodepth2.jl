@@ -4,7 +4,6 @@ authors = ["Anton Smirnov <anton.smn@protonmail.com>"]
 version = "0.1.0"
 
 [deps]
-AbstractTrees = "1520ce14-60c1-5f80-bbc7-55ef81b5835c"
 Augmentations = "201790e9-3802-4bf2-a4d2-ca8acc212efd"
 BSON = "fbb218c0-5317-5bc6-957e-2ee96dd4b1f0"
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"

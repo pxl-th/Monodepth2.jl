@@ -27,15 +27,8 @@ using ResNet
 
 CUDA.allowscalar(false)
 
-include("dtk.jl")
-include("utils.jl")
-include("depth_decoder.jl")
-include("pose_decoder.jl")
-include("model.jl")
-
 Zygote.@nograd CUDA.ones
 Zygote.@nograd CUDA.zeros
-Zygote.@nograd eye_like
 
 Base.@kwdef struct Params
     min_depth::Float64 = 0.1
@@ -61,6 +54,23 @@ struct TrainCache{S, B, P, K, I}
     target_pos_id::Int64
 end
 
+include("dtk.jl")
+include("utils.jl")
+include("depth_decoder.jl")
+include("pose_decoder.jl")
+include("model.jl")
+
+Zygote.@nograd eye_like
+
+function _get_transformation(rvec, t, invert)
+    R = so3_exp_map(rvec)
+    if invert
+        R = permutedims(R, (2, 1, 3))
+        t = R ⊠ -t
+    end
+    R, t
+end
+
 function warp(
     disparity, x, Ps, backproject, project, invK, K;
     min_depth, max_depth, source_ids,
@@ -76,15 +86,6 @@ function warp(
         grid_sample(x[:, :, :, wid[2], :], warped_uv; padding_mode=:border)
     end
     map(_warp, enumerate(source_ids))
-end
-
-function _get_transformation(rvec, t, invert)
-    R = compose_rotation(rvec)
-    if invert
-        R = permutedims(R, (2, 1, 3))
-        t = R ⊠ -t
-    end
-    R, t
 end
 
 function photometric_loss(
@@ -103,6 +104,7 @@ end
 
 function train_loss(
     model, x::AbstractArray{T}, auto_loss, train_cache::TrainCache, parameters::Params,
+    do_visualization,
 ) where T
     target_x = x[:, :, :, train_cache.target_pos_id, :]
     disparities, poses = model(
@@ -110,11 +112,16 @@ function train_loss(
         target_pos_id=train_cache.target_pos_id)
     rvecs, tvecs = poses # 3, 1, N
 
-    Ps = map(si -> _get_transformation(
-        rvecs[si[1]][:, 1, :], tvecs[si[1]],
-        si[2] < train_cache.target_pos_id), enumerate(train_cache.source_ids))
+    Ps = map(
+        i -> _get_transformation(
+            rvecs[i[1]][:, 1, :], tvecs[i[1]],
+            i[2] < train_cache.target_pos_id),
+        enumerate(train_cache.source_ids))
 
-    vis_warped, vis_loss = nothing, nothing
+    vis_warped, vis_loss, vis_disparity = nothing, nothing, nothing
+    if do_visualization
+        vis_disparity = cpu(disparities[end])
+    end
 
     loss = zero(T)
     for (i, scale) in enumerate(train_cache.scales)
@@ -138,18 +145,21 @@ function train_loss(
         end
         loss += mean(warp_loss)
 
-        disparity = reshape(disparity, size(disparity)[2:end])
-        disparity = disparity ./ (mean(disparity; dims=(1, 2)) .+ T(1e-7))
-        disparity_loss = smooth_loss(disparity, target_x) .* T(parameters.disparity_smoothness) .* T(scale)
+        normalized_disparity = reshape(disparity, size(disparity)[2:end])
+        normalized_disparity = normalized_disparity ./
+            (mean(normalized_disparity; dims=(1, 2)) .+ T(1e-7))
+        disparity_loss =
+            smooth_loss(normalized_disparity, target_x) .*
+            T(parameters.disparity_smoothness) .* T(scale)
         loss += disparity_loss
 
-        if i == length(train_cache.scales)
+        if do_visualization && i == length(train_cache.scales)
             vis_warped = cpu.(warped_images)
             vis_loss = cpu(warp_loss)
         end
     end
 
-    loss / T(length(train_cache.scales)), cpu(disparities[end]), vis_warped, vis_loss
+    loss / T(length(train_cache.scales)), vis_disparity, vis_warped, vis_loss
 end
 
 function save_disparity(disparity, path)
@@ -183,26 +193,24 @@ function train()
     image_dir = joinpath(dtk_dir, "imgs")
     image_files = readlines(joinpath(dtk_dir, "trainable-nonstatic"))
 
-    flip_augmentation = Sequential([
-        FlipX(0.5),
-        OneOf(0.2, [ToGray(1), Downscale(1, (0.4, 0.75)), Blur(;p=1)])])
+    flip_augmentation = Sequential([FlipX(0.5), ToGray(0.2)])
     dataset = Depth10k(image_dir, image_files; flip_augmentation)
     parameters = Params(;
         batch_size=2, target_size=dataset.resolution,
-        disparity_smoothness=1e-3, automasking=true)
+        disparity_smoothness=1e-3, automasking=false)
     max_scale, scale_levels = 5, collect(2:5)
     scales = [1.0 / 2.0^(max_scale - slevel) for slevel in scale_levels]
 
     println(parameters)
 
     # Transfer to the device.
-    projections = device(precision(Project(;
-        width=parameters.target_size[1], height=parameters.target_size[2])))
-    backprojections = device(precision(Backproject(;
-        width=parameters.target_size[1], height=parameters.target_size[2])))
-    Ks = device(precision(Array(dataset.K)))
-    invKs = device(precision(inv(Array(dataset.K))))
-    ssim = device(precision(SSIM()))
+    transfer = device ∘ precision
+    width, height = parameters.target_size
+    projections = Project(; width, height) |> transfer
+    backprojections = Backproject(; width, height) |> transfer
+    Ks = Array(dataset.K) |> transfer
+    invKs = inv(Array(dataset.K)) |> transfer
+    ssim = SSIM() |> transfer
 
     train_cache = TrainCache(
         ssim, backprojections, projections, Ks, invKs,
@@ -214,14 +222,14 @@ function train()
     # encoder_channels = collect(encoder.stages_channels)
     depth_decoder = DepthDecoder(;encoder_channels, scale_levels)
     pose_decoder = PoseDecoder(encoder_channels[end])
-    model = device(precision(Model(encoder, depth_decoder, pose_decoder)))
+    model = Model(encoder, depth_decoder, pose_decoder) |> transfer
 
     θ = params(model)
-    optimizer = ADAM(1e-4)
+    optimizer = ADAM(3e-4)
     trainmode!(model) # TODO: switch to test mode once it is implemented
 
     n_epochs = 20
-    log_iter, save_iter = 31, 250
+    log_iter, save_iter = 250, 500
 
     for epoch in 1:n_epochs
         loader = DataLoader(shuffleobs(dataset), parameters.batch_size)
@@ -241,15 +249,16 @@ function train()
 
             loss_cpu = 0.0
             disparity, warped, vis_loss = nothing, nothing, nothing
+            do_visualization = i % log_iter == 0
 
             Flux.Optimise.update!(optimizer, θ, gradient(θ) do
                 loss, disparity, warped, vis_loss = train_loss(
-                    model, x, auto_loss, train_cache, parameters)
+                    model, x, auto_loss, train_cache, parameters, do_visualization)
                 loss_cpu = cpu(loss)
                 loss
             end)
 
-            if i % log_iter == 0
+            if do_visualization
                 save_disparity(disparity[:, :, 1, 1], joinpath(log_dir, "disp-$epoch-$i.png"))
                 save(joinpath(log_dir, "loss-$epoch-$i.png"), permutedims(vis_loss[:, :, 1, 1], (2, 1)))
 
@@ -303,12 +312,44 @@ function refine_dtk()
     end
 end
 
-train()
+function simple_depth()
+    device = gpu
+    precision = f32
+
+    dtk_dir = "/home/pxl-th/projects/datasets/depth10k"
+    log_dir = "/home/pxl-th/projects/Monodepth2.jl/logs"
+    save_dir = "/home/pxl-th/projects/Monodepth2.jl/models"
+
+    isdir(log_dir) || mkdir(log_dir)
+    isdir(save_dir) || mkdir(save_dir)
+
+    image_dir = joinpath(dtk_dir, "imgs")
+    image_files = readlines(joinpath(dtk_dir, "trainable-nonstatic"))
+
+    dataset = Depth10k(image_dir, image_files)
+    width, height = dataset.resolution
+
+    transfer = device ∘ precision
+
+    projections = Project(; width, height) |> transfer
+    backprojections = Backproject(; width, height) |> transfer
+    Ks = Array(dataset.K) |> transfer
+    invKs = inv(Array(dataset.K)) |> transfer
+    ssim = SSIM() |> transfer
+
+    k = 8
+    println(dataset.files[k])
+
+    x = Flux.unsqueeze(dataset[k], 5) |> transfer
+    slow_depth(
+        x, ssim, backprojections, projections, invKs, Ks, transfer;
+        target_id=dataset.target_pos_id, source_ids=dataset.source_ids,
+        min_depth=0.1, max_depth=100.0, log_dir="/home/pxl-th/")
+end
+
+# train()
 # eval()
 # refine_dtk()
-
-# TODO
-# - evaluation on video
-# - make pose prediction optional
+simple_depth()
 
 end

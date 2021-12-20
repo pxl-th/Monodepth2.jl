@@ -57,8 +57,7 @@ invK (3, 3)
 (3, W*H, N)
 """
 function (b::Backproject)(depth, invK)
-    points = reshape(invK[1:3, 1:3] * b.coordinates, (3, size(b.coordinates, 2), 1))
-    points .* depth
+    depth .* reshape(invK * b.coordinates, (3, size(b.coordinates, 2), 1))
 end
 
 struct Project{N}
@@ -96,24 +95,25 @@ function (p::Project)(points::AbstractArray{V}, K, R, t) where V
 end
 
 # rvec 3xN
-function compose_rotation(rvec)
+function so3_exp_map(rvec)
     T, N = eltype(rvec), size(rvec, 2)
 
+    skew = hat(rvec)
+    skew² = skew ⊠ skew
+
+    # NOTE: regular sqrt gives NaN gradient on 0.
+    # Need to use subgradient (e.g. return 0 on 0).
     θ = sqrt.(sum(abs2, rvec; dims=1)) # 1xN
-    rvec = rvec ./ (θ .+ T(1e-7)) # 3xN
-    S = hat(rvec)
+    θ_inv = one(T) ./ max.(θ, T(1e-4))
 
-    rvec = reshape(rvec, (3, 1, N))
-    cosθ = reshape(cos.(θ), (1, 1, N))
-    sinθ = reshape(sin.(θ), (1, 1, N))
+    f1 = reshape(θ_inv .* sin.(θ), (1, 1, N))
+    f2 = reshape(θ_inv .* θ_inv .* (one(T) .- cos.(θ)), (1, 1, N))
 
-    rvec ⊠ permutedims(rvec, (2, 1, 3)) .* (one(T) .- cosθ) .+ # 3x3xN
-        cosθ .* eye_like(rvec, (3, 3)) .+ sinθ .* S
+    f1 .* skew .+ f2 .* skew² .+ eye_like(rvec, (3, 3))
 end
 
 function hat(rvec)
-    N = size(rvec, 2)
-    S = zeros_like(rvec, (3, 3, N))
+    S = zeros_like(rvec, (3, 3, size(rvec, 2)))
     S[2, 1, :] .=  rvec[3, :]
     S[1, 2, :] .= -rvec[3, :]
     S[3, 1, :] .= -rvec[2, :]
@@ -145,7 +145,7 @@ The goal of this loss is to make nearby pixels have the similar depth -> spatial
 
 # Arguments
 
-- `disparity`: `WHCN` shape.
+- `disparity`: `WHN` shape.
 - `image`: `WHCN` shape.
 
 # Returns

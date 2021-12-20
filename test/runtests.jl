@@ -10,17 +10,19 @@ using Flux
 using Monodepth
 CUDA.allowscalar(false)
 
+@testset "Monodepth" begin
+
 @testset "Test rotations" begin
     v = rand(Float64, (3, 1))
     p = rand(Float64, (3, 1))
 
     target = RotationVec(v...)
-    source = Monodepth.compose_rotation(v)
+    source = Monodepth.so3_exp_map(v)
     @test all(isapprox.(target, source[:, :, 1]; atol=1e-5))
     test_rrule(Monodepth.hat, v)
 
     vg = CuArray(v)
-    source = Monodepth.compose_rotation(vg)
+    source = Monodepth.so3_exp_map(vg)
     @test source isa CuArray
     @test all(isapprox.(target, collect(source)[:, :, 1]; atol=1e-5))
 end
@@ -96,7 +98,7 @@ end
 
     v = zeros(Float64, (3, N))
     t = zeros(Float64, (3, 1, N))
-    R = Monodepth.compose_rotation(v)
+    R = Monodepth.so3_exp_map(v)
 
     projection = Monodepth.Project(;width=res, height=res)
     backprojection = Monodepth.Backproject(;width=res, height=res)
@@ -106,4 +108,26 @@ end
     grid = reshape(warped_uv, (2, res, res, N))
     sampled = Monodepth.Flux.grid_sample(image, grid)
     @test all(isapprox.(image, sampled; atol=1e-3))
+end
+
+@testset "Test pose derivative" begin
+    # This tests that the gradients are the same
+    # as in the equivalent PyTorch version.
+    x = reshape(Float32[3, 2, 1], (3, 1, 1))
+    target = reshape(Float32[1, 2, 3], (3, 1, 1))
+
+    r = reshape(Float32[1.0, 0, 0], (3, 1))
+    t = reshape(Float32[0, 0, 0], (3, 1, 1))
+    θ = params(r, t)
+
+    ∇ = gradient(θ) do
+        R = Monodepth.so3_exp_map(r)
+        l = sum(sqrt.(sum(abs2, (R ⊠ x .+ t) .- target; dims=1)))
+        println(l)
+        l
+    end
+    @show ∇[r]
+    @show ∇[t]
+end
+
 end
