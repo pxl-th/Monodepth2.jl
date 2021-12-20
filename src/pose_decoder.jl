@@ -1,3 +1,9 @@
+struct Pose{R, T}
+    rvec::R # 3xN - so3 rotation
+    tvec::T # 3x1xN - translation
+end
+Flux.@functor Pose
+
 struct PoseDecoder{S, P}
     squeezer::S
     pose::P
@@ -18,5 +24,5 @@ function (decoder::PoseDecoder)(features)
     squeezed = cat(map(decoder.squeezer, features)...; dims=3)
     pose = mean(decoder.pose(squeezed); dims=(1, 2))
     pose = eltype(pose)(1e-2) .* reshape(pose, (6, 1, size(pose, 4)))
-    pose[1:3, :, :], pose[4:6, :, :]
+    Pose(pose[1:3, 1, :], pose[4:6, :, :])
 end

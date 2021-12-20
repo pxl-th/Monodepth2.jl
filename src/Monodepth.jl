@@ -59,6 +59,7 @@ include("utils.jl")
 include("depth_decoder.jl")
 include("pose_decoder.jl")
 include("model.jl")
+include("simple_depth.jl")
 
 Zygote.@nograd eye_like
 
@@ -103,20 +104,17 @@ end
     minimum(cat(map(p -> photometric_loss(ssim, p, target), predictions)...; dims=3); dims=3)
 
 function train_loss(
-    model, x::AbstractArray{T}, auto_loss, train_cache::TrainCache, parameters::Params,
+    model, x::AbstractArray{T}, auto_loss, cache::TrainCache, parameters::Params,
     do_visualization,
 ) where T
-    target_x = x[:, :, :, train_cache.target_pos_id, :]
-    disparities, poses = model(
-        x; source_ids=train_cache.source_ids,
-        target_pos_id=train_cache.target_pos_id)
-    rvecs, tvecs = poses # 3, 1, N
+    target_x = x[:, :, :, cache.target_pos_id, :]
+    disparities, poses = model(x, cache.source_ids, cache.target_pos_id)
 
+    # TODO pass as parameter to function
+    inverse_transform = cache.source_ids .< cache.target_pos_id
     Ps = map(
-        i -> _get_transformation(
-            rvecs[i[1]][:, 1, :], tvecs[i[1]],
-            i[2] < train_cache.target_pos_id),
-        enumerate(train_cache.source_ids))
+        p -> _get_transformation(p[1].rvec, p[1].tvec, p[2]),
+        zip(poses, inverse_transform))
 
     vis_warped, vis_loss, vis_disparity = nothing, nothing, nothing
     if do_visualization
@@ -124,9 +122,9 @@ function train_loss(
     end
 
     loss = zero(T)
-    for (i, scale) in enumerate(train_cache.scales)
+    for (i, scale) in enumerate(cache.scales)
         disparity = disparities[i]
-        if i != length(train_cache.scales)
+        if i != length(cache.scales)
             disparity = upsample_bilinear(disparity; size=parameters.target_size)
         end
 
@@ -134,12 +132,12 @@ function train_loss(
         disparity = reshape(disparity, (1, dw, dh, db))
         warped_images = warp(
             disparity, x, Ps,
-            train_cache.backprojections, train_cache.projections,
-            train_cache.invKs, train_cache.Ks;
+            cache.backprojections, cache.projections,
+            cache.invKs, cache.Ks;
             min_depth=parameters.min_depth, max_depth=parameters.max_depth,
-            source_ids=train_cache.source_ids)
+            source_ids=cache.source_ids)
 
-        warp_loss = prediction_loss(train_cache.ssim, warped_images, target_x)
+        warp_loss = prediction_loss(cache.ssim, warped_images, target_x)
         if parameters.automasking
             warp_loss = minimum(cat(auto_loss, warp_loss; dims=3); dims=3)
         end
@@ -153,13 +151,13 @@ function train_loss(
             T(parameters.disparity_smoothness) .* T(scale)
         loss += disparity_loss
 
-        if do_visualization && i == length(train_cache.scales)
+        if do_visualization && i == length(cache.scales)
             vis_warped = cpu.(warped_images)
             vis_loss = cpu(warp_loss)
         end
     end
 
-    loss / T(length(train_cache.scales)), vis_disparity, vis_warped, vis_loss
+    loss / T(length(cache.scales)), vis_disparity, vis_warped, vis_loss
 end
 
 function save_disparity(disparity, path)
@@ -196,7 +194,7 @@ function train()
     flip_augmentation = Sequential([FlipX(0.5), ToGray(0.2)])
     dataset = Depth10k(image_dir, image_files; flip_augmentation)
     parameters = Params(;
-        batch_size=2, target_size=dataset.resolution,
+        batch_size=1, target_size=dataset.resolution,
         disparity_smoothness=1e-3, automasking=false)
     max_scale, scale_levels = 5, collect(2:5)
     scales = [1.0 / 2.0^(max_scale - slevel) for slevel in scale_levels]
@@ -218,8 +216,6 @@ function train()
 
     encoder = ResidualNetwork(18; in_channels=3, classes=nothing)
     encoder_channels = collect(encoder.stages)
-    # encoder = EffNet("efficientnet-b0"; include_head=false, in_channels=3)
-    # encoder_channels = collect(encoder.stages_channels)
     depth_decoder = DepthDecoder(;encoder_channels, scale_levels)
     pose_decoder = PoseDecoder(encoder_channels[end])
     model = Model(encoder, depth_decoder, pose_decoder) |> transfer
@@ -312,44 +308,9 @@ function refine_dtk()
     end
 end
 
-function simple_depth()
-    device = gpu
-    precision = f32
-
-    dtk_dir = "/home/pxl-th/projects/datasets/depth10k"
-    log_dir = "/home/pxl-th/projects/Monodepth2.jl/logs"
-    save_dir = "/home/pxl-th/projects/Monodepth2.jl/models"
-
-    isdir(log_dir) || mkdir(log_dir)
-    isdir(save_dir) || mkdir(save_dir)
-
-    image_dir = joinpath(dtk_dir, "imgs")
-    image_files = readlines(joinpath(dtk_dir, "trainable-nonstatic"))
-
-    dataset = Depth10k(image_dir, image_files)
-    width, height = dataset.resolution
-
-    transfer = device ∘ precision
-
-    projections = Project(; width, height) |> transfer
-    backprojections = Backproject(; width, height) |> transfer
-    Ks = Array(dataset.K) |> transfer
-    invKs = inv(Array(dataset.K)) |> transfer
-    ssim = SSIM() |> transfer
-
-    k = 8
-    println(dataset.files[k])
-
-    x = Flux.unsqueeze(dataset[k], 5) |> transfer
-    slow_depth(
-        x, ssim, backprojections, projections, invKs, Ks, transfer;
-        target_id=dataset.target_pos_id, source_ids=dataset.source_ids,
-        min_depth=0.1, max_depth=100.0, log_dir="/home/pxl-th/")
-end
-
-# train()
+train()
 # eval()
 # refine_dtk()
-simple_depth()
+# simple_depth()
 
 end
