@@ -8,27 +8,37 @@ struct Depth10k{A}
     target_pos_id::Int64
 
     flip_augmentation::A
+    grayscale::Bool
 end
-function Depth10k(image_dir, image_files; flip_augmentation = nothing)
+function Depth10k(image_dir, image_files; flip_augmentation = nothing, grayscale = false)
     focal = 2648.0 / 4.63461538462
     width, height = 416, 128
     K = SMatrix{3, 3, Float64, 9}(
         focal, 0, 0,
         0, focal, 0,
         width / 2.0, height / 2.0, 1)
-    Depth10k(K, image_dir, image_files, (width, height), [1, 3], 2, flip_augmentation)
+    Depth10k(
+        K, image_dir, image_files, (width, height), [1, 3], 2,
+        flip_augmentation, grayscale)
 end
 
 Base.length(d::Depth10k) = length(d.files)
 function Base.getindex(d::Depth10k, i)
     width = d.resolution[1]
-    frames = joinpath(d.dir, d.files[i]) |> load
+    frames = load(joinpath(d.dir, d.files[i]))
+    if d.grayscale
+        frames = Gray{Float32}.(frames)
+    end
 
     frames = [frames[:, (width * j + 1):(width * (j + 1))] for j in 0:2]
     if d.flip_augmentation ≢ nothing
         frames = d.flip_augmentation(frames)
     end
-    frames = cat(channelview.(frames)...; dims=4)
+    frames = channelview.(frames)
+    if d.grayscale
+        frames = Flux.unsqueeze.(frames, 1)
+    end
+    frames = cat(frames...; dims=4)
     Float32.(permutedims(frames, (3, 2, 1, 4)))
 end
 

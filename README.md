@@ -22,6 +22,11 @@ Visualization of the disparity map learning dynamics for the triplet above.
 
 ## Important
 
-Norm function is computed using `sqrt.(sum(abs2, ...))`. However, `sqrt` function has `NaN` gradient at `0`.
-This can be mitigated by defining subgradient or even better, `norm` function that can act on the given axis, similar to PyTorch:
-https://github.com/pytorch/pytorch/issues/37354
+- Norm function is computed using `sqrt.(sum(abs2, ...))`.
+However, `sqrt` function has `NaN` gradient at `0`.
+This can be mitigated by defining subgradient or even better,
+`norm` function that can act on the given axis,
+[similar to PyTorch](https://github.com/pytorch/pytorch/issues/37354).
+
+- For poses, struct `Pose` is used instead of arrays or tuple because
+of [this issue](https://github.com/FluxML/Zygote.jl/issues/522).

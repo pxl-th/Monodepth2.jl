@@ -156,8 +156,14 @@ function smooth_loss(disparity, image)
     ∇disparity_x = abs.(disparity[1:(end - 1), :, :] .- disparity[2:end, :, :])
     ∇disparity_y = abs.(disparity[:, 1:(end - 1), :] .- disparity[:, 2:end, :])
 
-    ∇image_x = mean(abs.(image[1:(end - 1), :, :, :] .- image[2:end, :, :, :]); dims=3)[:, :, 1, :]
-    ∇image_y = mean(abs.(image[:, 1:(end - 1), :, :] .- image[:, 2:end, :, :]); dims=3)[:, :, 1, :]
+    ∇image_x = abs.(image[1:(end - 1), :, :, :] .- image[2:end, :, :, :])
+    ∇image_y = abs.(image[:, 1:(end - 1), :, :] .- image[:, 2:end, :, :])
+    if size(image, 3) > 1
+        ∇image_x = mean(∇image_x; dims=3)
+        ∇image_y = mean(∇image_y; dims=3)
+    end
+    ∇image_x = ∇image_x[:, :, 1, :]
+    ∇image_y = ∇image_y[:, :, 1, :]
 
     mean(∇disparity_x .* exp.(-∇image_x)) + mean(∇disparity_y .* exp.(-∇image_y))
 end

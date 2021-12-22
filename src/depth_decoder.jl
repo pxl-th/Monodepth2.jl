@@ -48,18 +48,18 @@ end
 
 function (d::DepthDecoder)(features)
     x, skips = features[end], features[(end - 1):-1:1]
-
+    n_skips = length(skips)
     bstart = 1
-    function runner(branch_id)
-        branch = d.branches[branch_id]
+
+    function _runner(branch, decoder)
         bend = bstart + length(branch) - 1
         brange = bstart:bend
         bstart = bend + 1
 
-        x = foldl(
-            (t, i) -> branch[i](t, brange[i] ≤ length(skips) ? skips[brange[i]] : nothing),
-            (x, 1:length(branch)...))
-        d.decoders[branch_id](x)
+        x = foldl((x, 1:length(branch)...)) do o, i
+            branch[i](o, brange[i] ≤ n_skips ? skips[brange[i]] : nothing)
+        end
+        decoder(x)
     end
-    map(runner, 1:length(d.branches))
+    map(k -> _runner(k...), zip(d.branches, d.decoders))
 end
