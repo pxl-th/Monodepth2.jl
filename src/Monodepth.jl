@@ -12,6 +12,7 @@ using FileIO
 using ImageCore
 using ImageTransformations
 using MLDataPattern: shuffleobs
+using VideoIO
 using ProgressMeter
 using Plots
 using StaticArrays
@@ -194,7 +195,7 @@ function train()
     width, height = dataset.resolution
     parameters = Params(;
         batch_size=4, target_size=dataset.resolution,
-        disparity_smoothness=1e-3, automasking=false)
+        disparity_smoothness=1e-2, automasking=false)
     max_scale, scale_levels = 5, collect(2:5)
     scales = [1.0 / 2.0^(max_scale - slevel) for slevel in scale_levels]
     println(parameters)
@@ -347,6 +348,29 @@ function eval()
     save_disparity(disparities[end][:, :, 1, 1], "/home/pxl-th/d.png")
 end
 
+function eval_video()
+    device = gpu
+    target_resolution = (128, 416) # depth10k resolution
+    precision = f32
+
+    model_path = "/home/pxl-th/projects/Monodepth2.jl/models/7-1000-0.044002514.bson"
+    video_path = "/home/pxl-th/projects/datasets/calib_challenge/labeled/4.hevc"
+
+    model = BSON.load(model_path, @__MODULE__)[:model_host]
+    model = device(precision(model))
+    model = testmode!(model)
+
+    for (i, frame) in enumerate(VideoIO.openvideo(video_path))
+        x = imresize(Gray{Float32}.(frame), target_resolution)
+        x = Float32.(channelview(x))
+        x = permutedims(Flux.unsqueeze(x, 1), (3, 2, 1))
+        x = device(Flux.unsqueeze(x, 4))
+
+        disparity = cpu(eval_disparity(model, x)[end])
+        save_disparity(disparity[:, :, 1, 1], "/home/pxl-th/d-$i.png")
+    end
+end
+
 function refine_dtk()
     dtk_dir = "/home/pxl-th/projects/datasets/depth10k"
     image_dir = joinpath(dtk_dir, "imgs")
@@ -365,5 +389,6 @@ train()
 # eval()
 # refine_dtk()
 # simple_depth()
+# eval_video()
 
 end

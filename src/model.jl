@@ -18,11 +18,10 @@ function (m::Model)(images, source_ids, target_id)
     disparities, poses
 end
 
-function eval_poses(m::Model, features, source_ids, target_id)
+eval_poses(m::Model, features, source_ids, target_id) =
     map(
         i -> m.pose_decoder(_get_pose_features(features, i, target_id)),
         source_ids)
-end
 
 eval_disparity(m::Model, x) = m.depth_decoder(m.encoder(x, Val(:stages)))
 
