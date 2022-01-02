@@ -6,6 +6,8 @@ Monocular depth estimation. Using single image to predict disparity map.
 
 ![Depth](./res/depth-kitti.gif)
 
+[[Full Video]](https://youtu.be/cIWeyuLgCVc)
+
 Training parameters:
 - resolution `416x128`;
 - ResNet 18 model;
