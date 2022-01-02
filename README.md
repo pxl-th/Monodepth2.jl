@@ -1,5 +1,7 @@
 # Monodepth2.jl
 
+Implementation of the ["Digging Into Self-Supervised Monocular Depth Estimation"](https://arxiv.org/abs/1806.01260) paper.
+
 ## Monodepth
 
 Monocular depth estimation. Using single image to predict disparity map.
