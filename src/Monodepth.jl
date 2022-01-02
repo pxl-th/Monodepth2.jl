@@ -52,10 +52,13 @@ struct TrainCache{S, B, P, K, I}
 
     scales::Vector{Float64}
     source_ids::Vector{Int64}
-    target_pos_id::Int64
+    target_id::Int64
 end
 
 include("dtk.jl")
+include("kitty.jl")
+include("dchain.jl")
+
 include("utils.jl")
 include("depth_decoder.jl")
 include("pose_decoder.jl")
@@ -91,11 +94,11 @@ function train_loss(
     model, x::AbstractArray{T}, auto_loss, cache::TrainCache, parameters::Params,
     do_visualization,
 ) where T
-    target_x = x[:, :, :, cache.target_pos_id, :]
-    disparities, poses = model(x, cache.source_ids, cache.target_pos_id)
+    target_x = x[:, :, :, cache.target_id, :]
+    disparities, poses = model(x, cache.source_ids, cache.target_id)
 
     # TODO pass as parameter to function
-    inverse_transform = cache.source_ids .< cache.target_pos_id
+    inverse_transform = cache.source_ids .< cache.target_id
     Ps = map(
         p -> _get_transformation(p[1].rvec, p[1].tvec, p[2]),
         zip(poses, inverse_transform))
@@ -103,13 +106,11 @@ function train_loss(
     vis_warped, vis_loss, vis_disparity = nothing, nothing, nothing
     if do_visualization
         vis_disparity = cpu(disparities[end])
-
-        # println("Pose:")
-        # println(cpu(poses[1].rvec)[:, 1], cpu(poses[1].tvec)[:, 1, 1])
     end
 
     loss = zero(T)
     width, height = parameters.target_size
+
     for (i, (disparity, scale)) in enumerate(zip(disparities, cache.scales))
         dw, dh, _, dn = size(disparity)
         if dw != width || dh != height
@@ -142,9 +143,6 @@ function train_loss(
         if do_visualization && i == length(cache.scales)
             vis_warped = cpu.(warped_images)
             vis_loss = cpu(warp_loss)
-
-            # println("Smooth loss: $disparity_loss")
-            # println("Warp loss: $(mean(warp_loss))")
         end
     end
 
@@ -177,25 +175,32 @@ function train()
     device = gpu
     precision = f32
 
-    dtk_dir = "/home/pxl-th/projects/datasets/depth10k"
     log_dir = "/home/pxl-th/projects/Monodepth2.jl/logs"
     save_dir = "/home/pxl-th/projects/Monodepth2.jl/models"
 
     isdir(log_dir) || mkdir(log_dir)
     isdir(save_dir) || mkdir(save_dir)
 
-    image_dir = joinpath(dtk_dir, "imgs")
-    image_files = readlines(joinpath(dtk_dir, "trainable-nonstatic"))
-
     grayscale = true
     in_channels = grayscale ? 1 : 3
+    augmentations = FlipX(0.5)
 
-    flip_augmentation = FlipX(0.5)
-    dataset = Depth10k(image_dir, image_files; flip_augmentation, grayscale)
+    # dtk_dir = "/home/pxl-th/projects/datasets/depth10k"
+    # dataset = Depth10k(
+    #     joinpath(dtk_dir, "imgs"),
+    #     readlines(joinpath(dtk_dir, "trainable-nonstatic"));
+    #     augmentations, grayscale)
+
+    kitty_dir = "/home/pxl-th/projects/datasets/kitty-dataset"
+    dchain = DChain(map(
+        s -> KittyDataset(kitty_dir, s; target_size=(128, 416), augmentations),
+        map(i -> @sprintf("%02d", i), 0:21)))
+    dataset = dchain.datasets[begin]
+
     width, height = dataset.resolution
     parameters = Params(;
         batch_size=4, target_size=dataset.resolution,
-        disparity_smoothness=1e-2, automasking=false)
+        disparity_smoothness=1e-3, automasking=false)
     max_scale, scale_levels = 5, collect(2:5)
     scales = [1.0 / 2.0^(max_scale - slevel) for slevel in scale_levels]
     println(parameters)
@@ -209,7 +214,7 @@ function train()
 
     train_cache = TrainCache(
         ssim, backprojections, projections, Ks, invKs,
-        scales, dataset.source_ids, dataset.target_pos_id)
+        scales, dataset.source_ids, dataset.target_id)
 
     encoder = ResidualNetwork(18; in_channels, classes=nothing)
     encoder_channels = collect(encoder.stages)
@@ -223,55 +228,16 @@ function train()
     trainmode!(model) # TODO: switch to test mode once it is implemented
 
     n_epochs = 20
-    log_iter, save_iter = 250, 500
-
-    # x = device(precision(Flux.unsqueeze(dataset[3], 5)))
-    # for i in 1:100_000
-    #     do_visualization = i % log_iter == 0 || i == 1
-    #     do_visualization && println("Iteration $i")
-
-    #     loss_cpu = 0.0
-    #     disparity, warped, vis_loss = nothing, nothing, nothing
-    #     ∇ = gradient(θ) do
-    #         loss, disparity, warped, vis_loss = train_loss(
-    #             model, x, nothing, train_cache, parameters, do_visualization)
-    #         loss_cpu = cpu(loss)
-    #         loss
-    #     end
-    #     Flux.Optimise.update!(optimizer, θ, ∇)
-
-    #     if do_visualization
-    #         println("Loss $i: $loss_cpu")
-    #         println("Min/max disparity: $(minimum(disparity)), $(maximum(disparity))")
-
-    #         println("Pose mean ∇:")
-    #         println(mean(∇[model.pose_decoder.pose[end].weight]))
-    #         println("Depth mean ∇:")
-    #         println(mean(∇[model.depth_decoder.decoders[end].d.weight]))
-
-    #         save_disparity(
-    #             disparity[:, :, 1, 1],
-    #             joinpath(log_dir, "disp-$i.png"))
-    #         save(
-    #             joinpath(log_dir, "loss-$i.png"),
-    #             permutedims(vis_loss[:, :, 1, 1], (2, 1)))
-    #         for sid in 1:length(warped)
-    #             save_warped(
-    #                 warped[sid][:, :, :, 1],
-    #                 joinpath(log_dir, "warp-$i-$sid.png"))
-    #         end
-    #     end
-    # end
-    # exit()
+    log_iter, save_iter = 50, 250
 
     # Perform first gradient computation using small batch size.
     println("Precompile grads...")
-    for images in DataLoader(dataset, 1)
+    for images in DataLoader(dchain, 1)
         x = device(precision(images))
-        gradient(θ) do
-            loss, _, _, _ = train_loss(
-                model, x, nothing, train_cache, parameters, false)
-            loss
+        @time begin
+            gradient(θ) do
+                train_loss(model, x, nothing, train_cache, parameters, false)[1]
+            end
         end
         break
     end
@@ -280,7 +246,7 @@ function train()
     # Do regular training.
     println("Training...")
     for epoch in 1:n_epochs
-        loader = DataLoader(shuffleobs(dataset), parameters.batch_size)
+        loader = DataLoader(shuffleobs(dchain), parameters.batch_size)
         bar = get_pb(length(loader), "Epoch $epoch / $n_epochs: ")
 
         for (i, images) in enumerate(loader)
@@ -289,7 +255,7 @@ function train()
             auto_loss = nothing
             if parameters.automasking
                 auto_loss = automasking_loss(
-                    train_cache.ssim, x, x[:, :, :, train_cache.target_pos_id, :];
+                    train_cache.ssim, x, x[:, :, :, train_cache.target_id, :];
                     source_ids=train_cache.source_ids) |> device
             end
 
@@ -343,9 +309,37 @@ function eval()
     model = BSON.load(model_path, @__MODULE__)[:model_host]
     model = model |> testmode!
 
-    x = dataset[1][:, :, :, [dataset.target_pos_id]]
+    x = dataset[1][:, :, :, [dataset.target_id]]
     disparities = eval_disparity(model, x)
     save_disparity(disparities[end][:, :, 1, 1], "/home/pxl-th/d.png")
+end
+
+function eval_image()
+    device = gpu
+    precision = f32
+    target_resolution = (128, 416)
+
+    image_dir = "/home/pxl-th/projects/datasets/kitty-dataset/sequences/00/image_0"
+    model_path = "/home/pxl-th/projects/Monodepth2.jl/models/4-3250-0.10780897.bson"
+    model = BSON.load(model_path, @__MODULE__)[:model_host]
+    model = testmode!(device(precision(model)))
+
+    bar = get_pb(4541, "Inference: ")
+    for i in 0:4540
+        image_path = joinpath(image_dir, @sprintf("%.06d.png", i))
+
+        x = load(image_path)
+        x = imresize(Gray{Float32}.(x), target_resolution)
+
+        x = Float32.(channelview(x))
+        x = permutedims(Flux.unsqueeze(x, 1), (3, 2, 1))
+        x = device(Flux.unsqueeze(x, 4))
+
+        disparity = cpu(eval_disparity(model, x)[end])
+        save_disparity(disparity[:, :, 1, 1], "/home/pxl-th/d-$i.png")
+
+        next!(bar)
+    end
 end
 
 function eval_video()
@@ -353,12 +347,10 @@ function eval_video()
     target_resolution = (128, 416) # depth10k resolution
     precision = f32
 
-    model_path = "/home/pxl-th/projects/Monodepth2.jl/models/7-1000-0.044002514.bson"
     video_path = "/home/pxl-th/projects/datasets/calib_challenge/labeled/4.hevc"
-
+    model_path = "/home/pxl-th/projects/Monodepth2.jl/models/6-500-0.026155949.bson"
     model = BSON.load(model_path, @__MODULE__)[:model_host]
-    model = device(precision(model))
-    model = testmode!(model)
+    model = testmode!(device(precision(model)))
 
     for (i, frame) in enumerate(VideoIO.openvideo(video_path))
         x = imresize(Gray{Float32}.(frame), target_resolution)
@@ -385,10 +377,11 @@ function refine_dtk()
     end
 end
 
-train()
+# train()
 # eval()
 # refine_dtk()
 # simple_depth()
 # eval_video()
+eval_image()
 
 end

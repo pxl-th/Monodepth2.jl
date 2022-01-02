@@ -2,15 +2,15 @@ struct Depth10k{A}
     K::SMatrix{3, 3, Float64, 9}
     dir::String
     files::Vector{String}
-    resolution::Tuple{Int64, Int64}
+    resolution::Tuple{Int64, Int64} # width, height
 
     source_ids::Vector{Int64}
-    target_pos_id::Int64
+    target_id::Int64
 
-    flip_augmentation::A
+    augmentations::A
     grayscale::Bool
 end
-function Depth10k(image_dir, image_files; flip_augmentation = nothing, grayscale = false)
+function Depth10k(image_dir, image_files; augmentations = nothing, grayscale = false)
     focal = 2648.0 / 4.63461538462
     width, height = 416, 128
     K = SMatrix{3, 3, Float64, 9}(
@@ -19,7 +19,7 @@ function Depth10k(image_dir, image_files; flip_augmentation = nothing, grayscale
         width / 2.0, height / 2.0, 1)
     Depth10k(
         K, image_dir, image_files, (width, height), [1, 3], 2,
-        flip_augmentation, grayscale)
+        augmentations, grayscale)
 end
 
 Base.length(d::Depth10k) = length(d.files)
@@ -31,8 +31,8 @@ function Base.getindex(d::Depth10k, i)
     end
 
     frames = [frames[:, (width * j + 1):(width * (j + 1))] for j in 0:2]
-    if d.flip_augmentation ≢ nothing
-        frames = d.flip_augmentation(frames)
+    if d.augmentations ≢ nothing
+        frames = d.augmentations(frames)
     end
     frames = channelview.(frames)
     if d.grayscale
@@ -54,7 +54,7 @@ function find_static(dataset::Depth10k, α)
         x = Flux.unsqueeze(x, 5)
 
         auto_loss = mean(automasking_loss(
-            ssim, x, x[:, :, :, dataset.target_pos_id, :];
+            ssim, x, x[:, :, :, dataset.target_id, :];
             source_ids=dataset.source_ids))
         if auto_loss > α
             push!(non_static, dataset.files[i])

@@ -6,6 +6,11 @@ Monocular depth estimation. Using single image to predict disparity map.
 
 TODO visualization, model info, etc.
 
+### Supported datasets
+
+- [KITTI odometry](http://www.cvlibs.net/datasets/kitti/eval_odometry.php)
+- [CommaAI Depth10k](https://github.com/commaai/depth10k)
+
 ## Simple disparity estimation
 
 Simple disparity estimation using gradient descent with parameters:

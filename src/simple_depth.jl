@@ -92,6 +92,6 @@ function simple_depth()
     x = Flux.unsqueeze(dataset[k], 5) |> transfer
     slow_depth(
         x, ssim, backprojections, projections, invKs, Ks, transfer;
-        target_id=dataset.target_pos_id, source_ids=dataset.source_ids,
+        target_id=dataset.target_id, source_ids=dataset.source_ids,
         min_depth=0.1, max_depth=100.0, log_dir="/home/pxl-th/")
 end
