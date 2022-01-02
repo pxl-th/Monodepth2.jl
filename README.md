@@ -4,7 +4,13 @@
 
 Monocular depth estimation. Using single image to predict disparity map.
 
-TODO visualization, model info, etc.
+![Depth](./res/depth-kitti.gif)
+
+Training parameters:
+- resolution `416x128`;
+- ResNet 18 model;
+- 4 epochs;
+- no automasking & using pose prediction network.
 
 ### Supported datasets
 
@@ -23,7 +29,7 @@ Simple disparity estimation using gradient descent with parameters:
 
 Visualization of the disparity map learning dynamics for the triplet above.
 
-![Depth](./res/output.gif)
+![Depth](./res/simple-depth.gif)
 
 ## Important
 
