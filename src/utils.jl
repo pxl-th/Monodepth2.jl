@@ -1,5 +1,6 @@
 eye_like(::AbstractArray{T}, shape) where T = Array{T, 2}(I, shape)
 eye_like(::CuArray{T}, shape) where T = CuArray{T, 2}(I, shape)
+Zygote.@nograd eye_like
 
 zeros_like(::AbstractArray{T}, shape) where T = zeros(T, shape)
 zeros_like(::CuArray{T}, shape) where T = CUDA.zeros(T, shape)
@@ -172,4 +173,13 @@ function disparity_to_depth(disparity::AbstractArray{T}, min_depth, max_depth) w
     min_disp = T(1.0 / max_depth)
     max_disp = T(1.0 / min_depth)
     one(T) ./ (disparity .* (max_disp - min_disp) .+ min_disp)
+end
+
+function composeT(rvec, t, invert)
+    R = so3_exp_map(rvec)
+    if invert
+        R = permutedims(R, (2, 1, 3))
+        t = R ⊠ -t
+    end
+    R, t
 end

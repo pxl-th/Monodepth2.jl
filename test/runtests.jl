@@ -32,12 +32,12 @@ end
     tvec = rand(Float64, (3, 1, 1))
     p = rand(Float64, (3, 1, 1))
 
-    R, t = Monodepth._get_transformation(rvec, tvec, false)
+    R, t = Monodepth.composeT(rvec, tvec, false)
     tp = RotationVec(rvec...) * p[:, 1, 1] .+ t[:, 1, 1]
     np = R ⊠ p .+ t
     @test all(isapprox.(np, tp; atol=1e-6))
 
-    R, t = Monodepth._get_transformation(rvec, tvec, true)
+    R, t = Monodepth.composeT(rvec, tvec, true)
     invR = transpose(RotationVec(rvec...))
     invt = -(invR * tvec[:, 1, 1])
     tp = invR * np[:, 1, 1] .+ invt

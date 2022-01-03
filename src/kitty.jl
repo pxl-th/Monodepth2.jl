@@ -2,6 +2,7 @@ struct KittyDataset{A}
     frames_dir::String
 
     K::SMatrix{3, 3, Float64, 9}
+    invK::SMatrix{3, 3, Float64, 9}
     resolution::Tuple{Int64, Int64}
 
     source_ids::Vector{Int64}
@@ -25,6 +26,7 @@ function KittyDataset(image_dir, sequence; target_size, augmentations = nothing)
 
     fx = mean(target_size ./ original_size) * K[1, 1]
     K = construct_intrinsic(fx, fx, target_size[2] ÷ 2, target_size[1] ÷ 2)
+    invK = inv(K)
 
     target_id = 2
     source_ids = [1, 3]
@@ -34,7 +36,7 @@ function KittyDataset(image_dir, sequence; target_size, augmentations = nothing)
     height, width = target_size
 
     KittyDataset(
-        frames_dir, K, (width, height),
+        frames_dir, K, invK, (width, height),
         source_ids, target_id, frame_ids, total_length,
         augmentations)
 end

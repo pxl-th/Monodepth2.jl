@@ -1,5 +1,7 @@
 struct Depth10k{A}
     K::SMatrix{3, 3, Float64, 9}
+    invK::SMatrix{3, 3, Float64, 9}
+
     dir::String
     files::Vector{String}
     resolution::Tuple{Int64, Int64} # width, height
@@ -17,8 +19,9 @@ function Depth10k(image_dir, image_files; augmentations = nothing, grayscale = f
         focal, 0, 0,
         0, focal, 0,
         width / 2.0, height / 2.0, 1)
+    invK = inv(K)
     Depth10k(
-        K, image_dir, image_files, (width, height), [1, 3], 2,
+        K, invK, image_dir, image_files, (width, height), [1, 3], 2,
         augmentations, grayscale)
 end
 

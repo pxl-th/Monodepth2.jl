@@ -24,7 +24,7 @@ function slow_depth(
 
         ∇ = gradient(θ) do
             Ps = map(
-                p -> _get_transformation(p[1].rvec, p[1].tvec, p[2]),
+                p -> composeT(p[1].rvec, p[1].tvec, p[2]),
                 zip(poses, inverse_transform))
 
             warped_images = warp(
