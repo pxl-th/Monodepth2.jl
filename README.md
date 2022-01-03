@@ -19,6 +19,16 @@ Training parameters:
 - [KITTI odometry](http://www.cvlibs.net/datasets/kitti/eval_odometry.php)
 - [CommaAI Depth10k](https://github.com/commaai/depth10k)
 
+### Install
+
+Install model, image-augmentation library and the package itself:
+
+```bash
+]add https://github.com/pxl-th/ResNet.jl.git
+]add https://github.com/pxl-th/Augmentations.jl.git
+]add https://github.com/pxl-th/Monodepth2.jl.git
+```
+
 ## Simple disparity estimation
 
 Simple disparity estimation using gradient descent with parameters:
