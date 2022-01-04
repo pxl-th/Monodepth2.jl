@@ -202,7 +202,7 @@ function eval_image()
     target_resolution = (128, 416)
 
     image_dir = "/home/pxl-th/projects/datasets/kitty-dataset/sequences/00/image_0"
-    model_path = "/home/pxl-th/projects/Monodepth2.jl/models/4-3250-0.10780897.bson"
+    model_path = "/home/pxl-th/projects/Monodepth2.jl/models/9-2500-0.12209008.bson"
     model = BSON.load(model_path, @__MODULE__)[:model_host]
     model = testmode!(device(precision(model)))
 
@@ -259,7 +259,7 @@ function refine_dtk()
     end
 end
 
-train()
+# train()
 # simple_depth()
 # eval_video()
 # eval_image()
