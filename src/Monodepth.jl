@@ -105,7 +105,7 @@ function train()
     width, height = dataset.resolution
     parameters = Params(;
         batch_size=4, target_size=dataset.resolution,
-        disparity_smoothness=1e-2, automasking=false)
+        disparity_smoothness=1e-3, automasking=false)
     max_scale, scale_levels = 5, collect(2:5)
     scales = [1.0 / 2.0^(max_scale - level) for level in scale_levels]
     println(parameters)
@@ -131,12 +131,14 @@ function train()
     # Perform first gradient computation using small batch size.
     println("Precompile grads...")
     for x in DataLoader(dchain, 1)
-        x = device(precision(x))
         @time begin
-            gradient(θ) do
-                train_loss(model, x, nothing, train_cache, parameters, false)[1]
+            ∇ = gradient(θ) do
+                train_loss(
+                    model, device(precision(x)), nothing,
+                    train_cache, parameters, false)[1]
             end
         end
+        println(mean(∇[model.pose_decoder.pose[end].weight]))
         break
     end
     GC.gc()
@@ -159,15 +161,13 @@ function train()
                     source_ids=train_cache.source_ids))
             end
 
-            x = device(x)
-
             loss_cpu = 0.0
             disparity, warped, vis_loss = nothing, nothing, nothing
             do_visualization = i % log_iter == 0 || i == 1
 
             Flux.Optimise.update!(optimizer, θ, gradient(θ) do
                 loss, disparity, warped, vis_loss = train_loss(
-                    model, x, auto_loss, train_cache,
+                    model, device(x), auto_loss, train_cache,
                     parameters, do_visualization)
                 loss_cpu = cpu(loss)
                 loss
@@ -177,9 +177,9 @@ function train()
                 save_disparity(
                     disparity[:, :, 1, 1],
                     joinpath(log_dir, "disp-$epoch-$i.png"))
-                save(
-                    joinpath(log_dir, "loss-$epoch-$i.png"),
-                    permutedims(vis_loss[:, :, 1, 1], (2, 1)))
+                # save(
+                #     joinpath(log_dir, "loss-$epoch-$i.png"),
+                #     permutedims(vis_loss[:, :, 1, 1], (2, 1)))
                 for sid in 1:length(warped)
                     save_warped(
                         warped[sid][:, :, :, 1],

@@ -11,7 +11,6 @@ Monocular depth estimation. Using single image to predict disparity map.
 Training parameters:
 - resolution `416x128`;
 - ResNet 18 model;
-- 4 epochs;
 - no automasking & using pose prediction network.
 
 ### Supported datasets
