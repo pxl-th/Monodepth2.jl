@@ -126,18 +126,23 @@ function train()
 
     θ = params(model)
     optimizer = ADAM(1e-4)
-    trainmode!(model) # TODO: switch to test mode once it is implemented
+    trainmode!(model)
 
     # Perform first gradient computation using small batch size.
     println("Precompile grads...")
     for x in DataLoader(dchain, 1)
+        x = device(precision(x))
+
+        println("Forward timing:")
+        @time train_loss(model, x, nothing, train_cache, parameters, false)[1]
+
+        println("Backward timing:")
         @time begin
             ∇ = gradient(θ) do
-                train_loss(
-                    model, device(precision(x)), nothing,
-                    train_cache, parameters, false)[1]
+                train_loss(model, x, nothing, train_cache, parameters, false)[1]
             end
         end
+
         println(mean(∇[model.pose_decoder.pose[end].weight]))
         break
     end
