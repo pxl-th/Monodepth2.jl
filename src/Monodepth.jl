@@ -130,8 +130,8 @@ function train()
 
     # Perform first gradient computation using small batch size.
     println("Precompile grads...")
-    for x in DataLoader(dchain, 1)
-        x = device(precision(x))
+    for x_host in DataLoader(dchain, 1)
+        x = transfer(x_host)
 
         println("Forward timing:")
         @time train_loss(model, x, nothing, train_cache, parameters, false)[1]
@@ -156,14 +156,14 @@ function train()
         loader = DataLoader(shuffleobs(dchain), parameters.batch_size)
         bar = get_pb(length(loader), "Epoch $epoch / $n_epochs: ")
 
-        for (i, x) in enumerate(loader)
-            x = precision(x)
+        for (i, x_host) in enumerate(loader)
+            x = transfer(x_host)
 
             auto_loss = nothing
             if parameters.automasking
-                auto_loss = device(automasking_loss(
+                auto_loss = automasking_loss(
                     train_cache.ssim, x, x[:, :, :, train_cache.target_id, :];
-                    source_ids=train_cache.source_ids))
+                    source_ids=train_cache.source_ids)
             end
 
             loss_cpu = 0.0
@@ -172,7 +172,7 @@ function train()
 
             Flux.Optimise.update!(optimizer, θ, gradient(θ) do
                 loss, disparity, warped, vis_loss = train_loss(
-                    model, device(x), auto_loss, train_cache,
+                    model, x, auto_loss, train_cache,
                     parameters, do_visualization)
                 loss_cpu = cpu(loss)
                 loss

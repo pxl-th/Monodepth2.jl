@@ -20,11 +20,13 @@ CUDA.allowscalar(false)
     source = Monodepth.so3_exp_map(v)
     @test all(isapprox.(target, source[:, :, 1]; atol=1e-5))
     test_rrule(Monodepth.hat, v)
+    @inferred Monodepth.so3_exp_map(v)
 
     vg = CuArray(v)
     source = Monodepth.so3_exp_map(vg)
     @test source isa CuArray
     @test all(isapprox.(target, collect(source)[:, :, 1]; atol=1e-5))
+    @inferred Monodepth.so3_exp_map(vg)
 end
 
 @testset "Test transformation" begin
@@ -36,6 +38,7 @@ end
     tp = RotationVec(rvec...) * p[:, 1, 1] .+ t[:, 1, 1]
     np = R ⊠ p .+ t
     @test all(isapprox.(np, tp; atol=1e-6))
+    @inferred Monodepth.composeT(rvec, tvec, false)
 
     R, t = Monodepth.composeT(rvec, tvec, true)
     invR = transpose(RotationVec(rvec...))
@@ -44,6 +47,7 @@ end
     op = R ⊠ np .+ t
     @test all(isapprox.(op, tp; atol=1e-6))
     @test all(isapprox.(op, p; atol=1e-6))
+    @inferred Monodepth.composeT(rvec, tvec, true)
 end
 
 @testset "Test SSIM" begin
@@ -53,6 +57,7 @@ end
     target = ones(Float64, 2, 2, 1, 1)
     score = ssim(source, target)
     @test all(isapprox.(score, 0.0))
+    @inferred ssim(source, target)
 
     target = zeros(Float64, 2, 2, 1, 1)
     score = ssim(source, target)
@@ -71,6 +76,7 @@ end
     tl = mean(abs.(disp[1:(end - 1), :, :, :] .- disp[2:end, :, :, :])) +
         mean(abs.(disp[:, 1:(end - 1), :, :] .- disp[:, 2:end, :, :]))
     @test sl ≈ tl
+    @inferred Monodepth.smooth_loss(disp, image)
 
     image = reshape(transpose(reshape(collect(0.1:0.1:0.4), (2, 2))), (2, 2, 1, 1))
     sl = Monodepth.smooth_loss(disp, image)
@@ -82,6 +88,8 @@ end
     depth = Monodepth.disparity_to_depth(disp, 0.1, 100.0)
     @test minimum(depth) ≥ 0.1
     @test maximum(depth) ≤ 100.0
+
+    @inferred Monodepth.disparity_to_depth(disp, 0.1, 100.0)
 end
 
 @testset "Test identity image warping" begin
@@ -108,6 +116,10 @@ end
     grid = reshape(warped_uv, (2, res, res, N))
     sampled = Monodepth.Flux.grid_sample(image, grid)
     @test all(isapprox.(image, sampled; atol=1e-3))
+
+    @inferred backprojection(depth, invK)
+    @inferred projection(camera_points, K, R, t)
+    @inferred Monodepth.Flux.grid_sample(image, grid)
 end
 
 @testset "Test pose derivative" begin

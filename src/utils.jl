@@ -20,8 +20,9 @@ SSIM() = SSIM(MeanPool((3, 3); stride=1), 0.01^2, 0.03^2)
 The more similar `x` and `y` are, the lower output values will be.
 The function is symmetric.
 """
-function (ssim::SSIM)(x::AbstractArray{T}, y) where T
-    x_ref, y_ref = pad_reflect(x, 1), pad_reflect(y, 1)
+function (ssim::SSIM)(x::AbstractArray{T}, y::K) where {T, K}
+    x_ref = pad_reflect(x, 1)::K
+    y_ref = pad_reflect(y, 1)::K
     μx, μy = ssim.pool(x_ref), ssim.pool(y_ref)
 
     two, c1, c2 = T(2.0), T(ssim.c1), T(ssim.c2)
