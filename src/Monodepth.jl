@@ -124,7 +124,7 @@ function train()
         DepthDecoder(;encoder_channels, scale_levels),
         PoseDecoder(encoder_channels[end])))
 
-    θ = params(model)
+    θ = Flux.params(model)
     optimizer = ADAM(1e-4)
     trainmode!(model)
 
