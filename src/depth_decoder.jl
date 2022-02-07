@@ -46,7 +46,7 @@ function DepthDecoder(;encoder_channels, scale_levels)
     DepthDecoder(branches, decoders)
 end
 
-function (d::DepthDecoder)(features)
+function (d::DepthDecoder)(features::NTuple{N, T})::Vector{T} where {T, N}
     x, skips = features[end], features[(end - 1):-1:1]
     n_skips = length(skips)
     bstart = 1

@@ -20,9 +20,13 @@ function PoseDecoder(encoder_out_channels)
     PoseDecoder(squeezer, pose)
 end
 
-function (decoder::PoseDecoder)(features)
-    squeezed = cat(map(decoder.squeezer, features)...; dims=3)
+function _squeeze(squeezer, features::NTuple{N, T})::T where {N, T}
+    cat(map(squeezer, features)...; dims=3)
+end
+
+function (decoder::PoseDecoder)(features::NTuple{N, T}) where {N, T}
+    squeezed = _squeeze(decoder.squeezer, features)
     pose = mean(decoder.pose(squeezed); dims=(1, 2))
-    pose = eltype(pose)(1e-2) .* reshape(pose, (6, 1, size(pose, 4)))
+    pose = eltype(T)(1e-2) .* reshape(pose, (6, 1, size(pose, 4)))
     Pose(pose[1:3, 1, :], pose[4:6, :, :])
 end

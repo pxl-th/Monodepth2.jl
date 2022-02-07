@@ -72,12 +72,13 @@ include("simple_depth.jl")
 include("training.jl")
 
 function train()
-    device = gpu
+    device = cpu
     precision = f32
     transfer = device ∘ precision
+    @show transfer
 
-    log_dir = "/home/pxl-th/projects/Monodepth2.jl/logs"
-    save_dir = "/home/pxl-th/projects/Monodepth2.jl/models"
+    log_dir = "/home/pxl-th/projects/Monodepth2.jl/logs2"
+    save_dir = "/home/pxl-th/projects/Monodepth2.jl/models2"
 
     isdir(log_dir) || mkdir(log_dir)
     isdir(save_dir) || mkdir(save_dir)
@@ -147,6 +148,7 @@ function train()
         break
     end
     GC.gc()
+    exit()
 
     # Do regular training.
     n_epochs, log_iter, save_iter = 20, 50, 500
@@ -264,7 +266,7 @@ function refine_dtk()
     end
 end
 
-# train()
+train()
 # simple_depth()
 # eval_video()
 # eval_image()

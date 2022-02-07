@@ -6,11 +6,17 @@ function photometric_loss(
     α .* ssim_loss .+ (one(T) - α) .* l1_loss
 end
 
-@inline automasking_loss(ssim, inputs, target; source_ids) =
+@inline function automasking_loss(ssim, inputs, target::T; source_ids)::T where T
     minimum(cat(map(i -> photometric_loss(ssim, inputs[:, :, :, i, :], target), source_ids)...; dims=3); dims=3)
+end
 
-@inline prediction_loss(ssim, predictions, target) =
+@inline function prediction_loss(ssim, predictions, target::T)::T where T
     minimum(cat(map(p -> photometric_loss(ssim, p, target), predictions)...; dims=3); dims=3)
+end
+
+@inline function _apply_mask(mask::T, warp_loss::T)::T where T
+    minimum(cat(mask, warp_loss; dims=3); dims=3)
+end
 
 function train_loss(
     model, x::AbstractArray{T}, auto_loss, cache::TrainCache, parameters::Params,
@@ -52,7 +58,7 @@ function train_loss(
 
         warp_loss = prediction_loss(cache.ssim, warped_images, target_x)
         if parameters.automasking
-            warp_loss = minimum(cat(auto_loss, warp_loss; dims=3); dims=3)
+            warp_loss = _apply_mask(auto_loss, warp_loss)
         end
 
         normalized_disparity = (
