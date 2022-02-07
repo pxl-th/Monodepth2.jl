@@ -20,16 +20,12 @@ gr()
 
 import ChainRulesCore: rrule
 using ChainRulesCore
-using Zygote
 using CUDA
 using Flux
 using ResNet
 
 import Random
 Random.seed!(42)
-
-Zygote.@nograd CUDA.ones
-Zygote.@nograd CUDA.zeros
 
 CUDA.allowscalar(false)
 
@@ -72,13 +68,13 @@ include("simple_depth.jl")
 include("training.jl")
 
 function train()
-    device = cpu
+    device = gpu
     precision = f32
     transfer = device ∘ precision
     @show transfer
 
-    log_dir = "/home/pxl-th/projects/Monodepth2.jl/logs2"
-    save_dir = "/home/pxl-th/projects/Monodepth2.jl/models2"
+    log_dir = "/home/pxl-th/projects/Monodepth2.jl/logs_2"
+    save_dir = "/home/pxl-th/projects/Monodepth2.jl/models_2"
 
     isdir(log_dir) || mkdir(log_dir)
     isdir(save_dir) || mkdir(save_dir)
@@ -134,21 +130,20 @@ function train()
     for x_host in DataLoader(dchain, 1)
         x = transfer(x_host)
 
-        println("Forward timing:")
+        println("Forward:")
         @time train_loss(model, x, nothing, train_cache, parameters, false)[1]
 
-        println("Backward timing:")
+        println("Backward:")
         @time begin
             ∇ = gradient(θ) do
                 train_loss(model, x, nothing, train_cache, parameters, false)[1]
             end
         end
 
-        println(mean(∇[model.pose_decoder.pose[end].weight]))
+        @show mean(∇[model.pose_decoder.pose[end].weight])
         break
     end
     GC.gc()
-    exit()
 
     # Do regular training.
     n_epochs, log_iter, save_iter = 20, 50, 500
@@ -266,7 +261,7 @@ function refine_dtk()
     end
 end
 
-train()
+# train()
 # simple_depth()
 # eval_video()
 # eval_image()

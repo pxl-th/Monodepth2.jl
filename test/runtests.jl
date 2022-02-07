@@ -5,7 +5,6 @@ using LinearAlgebra
 using Statistics
 using Rotations
 using CUDA
-using Zygote
 using Flux
 using Monodepth
 CUDA.allowscalar(false)
@@ -130,7 +129,7 @@ end
 
     r = reshape(Float32[1.0, 0, 0], (3, 1))
     t = reshape(Float32[0, 0, 0], (3, 1, 1))
-    θ = params(r, t)
+    θ = Flux.params(r, t)
 
     ∇ = gradient(θ) do
         R = Monodepth.so3_exp_map(r)

@@ -1,12 +1,14 @@
 eye_like(::AbstractArray{T}, shape) where T = Array{T, 2}(I, shape)
 eye_like(::CuArray{T}, shape) where T = CuArray{T, 2}(I, shape)
-Zygote.@nograd eye_like
+@non_differentiable eye_like(::Any...)
 
 zeros_like(::AbstractArray{T}, shape) where T = zeros(T, shape)
 zeros_like(::CuArray{T}, shape) where T = CUDA.zeros(T, shape)
+@non_differentiable zeros_like(::Any...)
 
 ones_like(::AbstractArray{T}, shape) where T = ones(T, shape)
 ones_like(::CuArray{T}, shape) where T = CUDA.ones(T, shape)
+@non_differentiable ones_like(::Any...)
 
 struct SSIM{P}
     pool::P
